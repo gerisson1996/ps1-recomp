@@ -140,10 +140,20 @@ void hle_libcd_CdInit(recomp_context *ctx) {
 
 // CdRead(sectors, *buf, mode)
 //
-// Asynchronous read.  Updates the read-state slots in psyq_state() that
-// bios.cpp consults from triggerCdromEvent(INT1)/drainPendingCallbacks,
-// then issues CdlSetmode + CdlReadN.  CdlSetloc must already have been
-// sent by the caller (PsyQ requires it before CdRead).
+// Updates the read-state slots in psyq_state() that bios.cpp consults from
+// triggerCdromEvent(INT1)/drainPendingCallbacks, then issues CdlSetmode +
+// CdlReadN.  CdlSetloc must already have been sent by the caller (PsyQ
+// requires it before CdRead).
+//
+// When the game registered no data callback (cdDataCb == 0) the read is
+// completed synchronously before returning.  Real libcd CdRead is async,
+// but games pair it with CdReadSync -- and the recompiled MIPS CdReadSync
+// decides "ready" from CD sync state already satisfied by earlier INTs
+// (Setloc/Init left sync=Complete), so it returns without waiting for the
+// data INT1.  The caller then reads the destination buffer racing against
+// the cross-thread sector copy; on Crash Bandicoot's boot the ISO9660 PVD
+// memcmp lost that race in ~60% of runs.  Completing the transfer here
+// removes the scheduling dependence entirely.
 //
 void hle_libcd_CdRead(recomp_context *ctx) {
   auto *bios = ctx->bios;
@@ -181,6 +191,36 @@ void hle_libcd_CdRead(recomp_context *ctx) {
 
       // CdlReadN -- current Setloc target, no parameters.
       issueCommand(cdrom, CDL_READN);
+
+      // Synchronous completion (see header comment).  Pump the controller
+      // from this thread: each tick delivers at most one sector INT1, the
+      // event-queue drain runs the BIOS HLE sector copy right here on the
+      // game thread, and the ACK releases the next sector.  Ticking from
+      // the game thread mirrors the established drainPendingCallbacks pump
+      // (bios.cpp); the INT1s still flow through triggerCdromEvent so
+      // cdReadyByte and event delivery stay consistent.  A bounded stall
+      // budget (instead of a wall-clock deadline) keeps the no-disc /
+      // drive-error case cheap: after a few fruitless ticks we fall back
+      // to the plain async behaviour with the read left armed.
+      if (state.cdDataCb == 0) {
+        int stall = 0;
+        while (state.cdRemaining > 0 && stall < 8) {
+          uint32_t before = state.cdRemaining;
+          bios->drainCdromEventQueue();
+          if (state.cdRemaining == before)
+            cdrom->tick(cdrom->getCyclesPerSector());
+          if (state.cdRemaining < before) {
+            stall = 0;
+            // Sector consumed by the HLE copy: ACK so tick() can deliver
+            // the next one (drainPendingCallbacks would otherwise only do
+            // this at the next drain point).
+            cdrom->ackInterrupt(0x1F);
+            cdrom->clearWaitingForAck();
+          } else {
+            ++stall;
+          }
+        }
+      }
     }
   }
 
@@ -286,6 +326,51 @@ void hle_libcd_CdReady(recomp_context *ctx) {
   }
 
   ctx->r[V0] = code;
+}
+
+// CdReadSync(mode, *result)
+//
+// Companion to the CdRead HLE.  `cdRemaining` counts the sectors still
+// pending in the active read; the INT1 sector copy that decrements it runs
+// on this thread during callback drains (bios.cpp::triggerCdromEvent).
+// mode==0 blocks until the transfer completes, mode!=0 polls.  Returns the
+// number of sectors left (0 = done) or -1 on timeout, matching libcd.
+//
+// The recompiled MIPS CdReadSync carries a bounded retry budget calibrated
+// for real drive latency.  Against our CdromController -- ticked at SDL
+// frame cadence on the render thread -- that budget expires or survives
+// depending on host scheduling, which made every boot-time read bimodal.
+// Waiting on `cdRemaining` removes the cross-thread timing dependence.
+//
+void hle_libcd_CdReadSync(recomp_context *ctx) {
+  uint32_t mode      = ctx->r[A0];
+  uint32_t resultPtr = ctx->r[A1];
+  auto &state = psyq_state();
+
+  if (mode == 0) {
+    auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+    while (state.cdRemaining > 0) {
+      if (std::chrono::steady_clock::now() >= deadline) {
+        if (resultPtr != 0)
+          for (int i = 0; i < 8; ++i)
+            ctx->mem->write8(resultPtr + i, 0);
+        ctx->r[V0] = static_cast<uint32_t>(-1);
+        return;
+      }
+      if (auto *bios = ctx->bios)
+        bios->drainCdromEventQueue();
+      if (getConfig().drainCallbacks)
+        getConfig().drainCallbacks();
+      std::this_thread::sleep_for(std::chrono::microseconds(100));
+    }
+  }
+
+  if (resultPtr != 0) {
+    ctx->mem->write8(resultPtr + 0, CDL_COMPLETE);
+    for (int i = 1; i < 8; ++i)
+      ctx->mem->write8(resultPtr + i, 0);
+  }
+  ctx->r[V0] = state.cdRemaining;
 }
 
 // CdControl(com, *param, *result)
@@ -408,6 +493,7 @@ void psyq_register_libcd() {
   psyq_register("libcd_CdRead",          &hle_libcd_CdRead);
   psyq_register("libcd_CdSync",          &hle_libcd_CdSync);
   psyq_register("libcd_CdReady",         &hle_libcd_CdReady);
+  psyq_register("libcd_CdReadSync",      &hle_libcd_CdReadSync);
   psyq_register("libcd_CdControl",       &hle_libcd_CdControl);
   psyq_register("libcd_CdControlF",      &hle_libcd_CdControlF);
   psyq_register("libcd_CdGetSector",     &hle_libcd_CdGetSector);

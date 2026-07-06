@@ -37,6 +37,11 @@ void hle_libcd_CdSync(recomp_context *ctx);
 /// Returns the libcd response code (CdlDataReady=1 / CdlDataEnd=4 / etc.).
 void hle_libcd_CdReady(recomp_context *ctx);
 
+/// CdReadSync(mode, *result) -- wait (mode=0) or poll (mode!=0) for the
+/// CdRead started earlier to finish.  Returns sectors remaining (0 = done)
+/// or -1 on timeout.
+void hle_libcd_CdReadSync(recomp_context *ctx);
+
 /// CdControl(com, *param, *result) -- send a synchronous CD command.
 /// Pushes the right number of parameter bytes for `com`, drains the response
 /// FIFO into `*result` if non-null.  Returns 1.

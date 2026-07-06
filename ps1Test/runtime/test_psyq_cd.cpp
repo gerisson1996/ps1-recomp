@@ -19,6 +19,10 @@
 
 #include <gtest/gtest.h>
 
+#include <cstring>
+#include <filesystem>
+#include <fstream>
+
 using namespace ps1;
 using namespace ps1::psyq;
 
@@ -31,6 +35,7 @@ protected:
   cdrom::VirtualFs fs;
   cdrom::CdromController cdrom;
   std::unique_ptr<bios::Bios> bios;
+  std::filesystem::path discPath;
 
   void SetUp() override {
     ctx.reset();
@@ -50,7 +55,46 @@ protected:
     psyq::psyq_state().reset();
   }
 
-  void TearDown() override { psyq::psyq_state().reset(); }
+  void TearDown() override {
+    psyq::psyq_state().reset();
+    if (!discPath.empty())
+      std::filesystem::remove(discPath);
+  }
+
+  // Build a minimal BIN disc (unique temp file per test) with the ISO9660
+  // PVD marker at LBA 16 and a recognizable pattern at LBA 17, then attach
+  // it to the controller.  Mirrors the layout Crash Bandicoot's boot reads.
+  void attachTestDisc() {
+    const auto *info = ::testing::UnitTest::GetInstance()->current_test_info();
+    discPath = std::filesystem::temp_directory_path() /
+               (std::string("psyq_cd_") + info->name() + ".bin");
+
+    std::vector<uint8_t> data(cdrom::SECTOR_SIZE_RAW * 20, 0);
+    size_t pvd = 16 * cdrom::SECTOR_SIZE_RAW + 24;
+    data[pvd] = 1;
+    std::memcpy(&data[pvd + 1], "CD001", 5);
+    size_t s17 = 17 * cdrom::SECTOR_SIZE_RAW + 24;
+    std::memcpy(&data[s17], "SECT17!!", 8);
+
+    std::ofstream out(discPath, std::ios::binary);
+    out.write(reinterpret_cast<const char *>(data.data()), data.size());
+    out.close();
+
+    ASSERT_TRUE(fs.loadDisc(discPath));
+    cdrom.attachVirtualFs(&fs);
+  }
+
+  // CdlSetloc via the register interface (M:S:F, BCD), ACK'd like the
+  // recompiled kernel would.
+  void setloc(uint8_t m, uint8_t s, uint8_t f) {
+    cdrom.writeRegister(0x1F801800, 0);
+    cdrom.writeRegister(0x1F801802, cdrom::CdromController::toBcd(m));
+    cdrom.writeRegister(0x1F801802, cdrom::CdromController::toBcd(s));
+    cdrom.writeRegister(0x1F801802, cdrom::CdromController::toBcd(f));
+    cdrom.writeRegister(0x1F801801, 0x02);
+    cdrom.ackInterrupt(0x1F);
+    cdrom.clearWaitingForAck();
+  }
 };
 
 } // namespace
@@ -188,6 +232,73 @@ TEST_F(PsyqCdTest, CdReadWithZeroSectorsDoesNotResetCurrentLba) {
   EXPECT_EQ(psyq::psyq_state().cdRemaining, 1u);
 }
 
+TEST_F(PsyqCdTest, CdReadWithoutDataCallbackCompletesSynchronously) {
+  // T1b: with no CdReadCallback registered, CdRead must not return until the
+  // sector is in RAM.  This is the Crash Bandicoot boot scenario: the
+  // recompiled CdReadSync reports "ready" from earlier INTs, so the PVD
+  // memcmp right after CdRead raced the cross-thread sector copy (~60% loss).
+  attachTestDisc();
+  setloc(0, 2, 16); // LBA 16 = ISO9660 PVD
+
+  ctx.r[A0] = 1;
+  ctx.r[A1] = 0x80020000u;
+  ctx.r[A2] = 0x80;
+  hle_libcd_CdRead(&ctx);
+
+  EXPECT_EQ(ctx.r[V0], 1u);
+  EXPECT_EQ(psyq::psyq_state().cdRemaining, 0u)
+      << "read must be complete when CdRead returns";
+
+  // The PVD marker the game memcmps must already be in RAM.
+  EXPECT_EQ(mem.read8(0x80020000u), 1u);
+  char cd001[6] = {};
+  for (int i = 0; i < 5; ++i)
+    cd001[i] = static_cast<char>(mem.read8(0x80020001u + i));
+  EXPECT_STREQ(cd001, "CD001");
+
+  // INT1 still flowed through triggerCdromEvent.
+  EXPECT_EQ(psyq::psyq_state().cdReadyByte.load(), 1u);
+}
+
+TEST_F(PsyqCdTest, CdReadWithoutDataCallbackCompletesMultipleSectors) {
+  // The inline ACK between sectors is what lets tick() deliver sector N+1;
+  // without it the pump would stall after the first INT1.
+  attachTestDisc();
+  setloc(0, 2, 16);
+
+  ctx.r[A0] = 2;
+  ctx.r[A1] = 0x80020000u;
+  ctx.r[A2] = 0x80;
+  hle_libcd_CdRead(&ctx);
+
+  EXPECT_EQ(psyq::psyq_state().cdRemaining, 0u);
+  EXPECT_EQ(psyq::psyq_state().cdDestPtr, 0x80020000u + 2u * 2048u);
+
+  // Sector 17's payload landed right after sector 16's.
+  char tag[9] = {};
+  for (int i = 0; i < 8; ++i)
+    tag[i] = static_cast<char>(mem.read8(0x80020800u + i));
+  EXPECT_STREQ(tag, "SECT17!!");
+}
+
+TEST_F(PsyqCdTest, CdReadWithDataCallbackStaysAsynchronous) {
+  // Games that registered a data callback consume sectors from the INT1
+  // dispatch path (drainPendingCallbacks); CdRead must not eat the sectors
+  // synchronously out from under it.
+  attachTestDisc();
+  setloc(0, 2, 16);
+  psyq::psyq_state().cdDataCb = 0x80001000u;
+
+  ctx.r[A0] = 1;
+  ctx.r[A1] = 0x80020000u;
+  ctx.r[A2] = 0x80;
+  hle_libcd_CdRead(&ctx);
+
+  EXPECT_EQ(ctx.r[V0], 1u);
+  EXPECT_EQ(psyq::psyq_state().cdRemaining, 1u)
+      << "read must stay armed for the callback path";
+}
+
 // CdSync / CdReady
 
 TEST_F(PsyqCdTest, CdSyncPollReturnsCompleteUnconditionally) {
@@ -246,6 +357,61 @@ TEST_F(PsyqCdTest, CdReadyPollWithZeroAtomicReturnsDataReadySentinel) {
   ctx.r[A1] = 0;
   hle_libcd_CdReady(&ctx);
   EXPECT_EQ(ctx.r[V0], 1u); // CdlDataReady sentinel
+}
+
+// CdReadSync
+
+TEST_F(PsyqCdTest, CdReadSyncReturnsZeroWhenNoReadPending) {
+  HleConfig cfg{};
+  configure(cfg);
+
+  psyq::psyq_state().cdRemaining = 0;
+  ctx.r[A0] = 0;
+  ctx.r[A1] = 0;
+  hle_libcd_CdReadSync(&ctx);
+  EXPECT_EQ(ctx.r[V0], 0u);
+}
+
+TEST_F(PsyqCdTest, CdReadSyncPollReturnsRemainingWithoutBlocking) {
+  HleConfig cfg{};
+  configure(cfg);
+
+  psyq::psyq_state().cdRemaining = 3;
+  ctx.r[A0] = 1;
+  ctx.r[A1] = 0;
+  hle_libcd_CdReadSync(&ctx);
+  EXPECT_EQ(ctx.r[V0], 3u);
+}
+
+TEST_F(PsyqCdTest, CdReadSyncBlocksUntilDrainCompletesRead) {
+  // The INT1 sector copy that decrements cdRemaining runs inside callback
+  // drains on the game thread; model it with a drain hook.
+  HleConfig cfg{};
+  cfg.drainCallbacks = [] {
+    auto &st = psyq::psyq_state();
+    if (st.cdRemaining > 0)
+      st.cdRemaining -= 1;
+  };
+  configure(cfg);
+
+  psyq::psyq_state().cdRemaining = 2;
+  ctx.r[A0] = 0;
+  ctx.r[A1] = 0;
+  hle_libcd_CdReadSync(&ctx);
+  EXPECT_EQ(ctx.r[V0], 0u);
+  EXPECT_EQ(psyq::psyq_state().cdRemaining, 0u);
+}
+
+TEST_F(PsyqCdTest, CdReadSyncFillsResultStructWhenProvided) {
+  HleConfig cfg{};
+  configure(cfg);
+
+  psyq::psyq_state().cdRemaining = 0;
+  ctx.r[A0] = 0;
+  ctx.r[A1] = 0x80100000;
+  hle_libcd_CdReadSync(&ctx);
+  EXPECT_EQ(ctx.r[V0], 0u);
+  EXPECT_EQ(mem.read8(0x80100000), 2u); // CdlComplete
 }
 
 TEST_F(PsyqCdTest, TriggerCdromEventInt2WritesAtomicToComplete) {
@@ -485,10 +651,10 @@ TEST_F(PsyqCdTest, RegisterLibcdExposesAll12FunctionsViaDispatch) {
 
   const char *names[] = {
       "libcd_CdInit",          "libcd_CdRead",         "libcd_CdSync",
-      "libcd_CdReady",         "libcd_CdControl",      "libcd_CdControlF",
-      "libcd_CdGetSector",     "libcd_CdReadCallback", "libcd_CdReadyCallback",
-      "libcd_CdDataCallback",  "libcd_CdMix",          "libcd_CdReadBreak",
-      "libcd_StSetMask",
+      "libcd_CdReady",         "libcd_CdReadSync",     "libcd_CdControl",
+      "libcd_CdControlF",      "libcd_CdGetSector",    "libcd_CdReadCallback",
+      "libcd_CdReadyCallback", "libcd_CdDataCallback", "libcd_CdMix",
+      "libcd_CdReadBreak",     "libcd_StSetMask",
   };
 
   HleConfig cfg{};
