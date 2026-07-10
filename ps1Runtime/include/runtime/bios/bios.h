@@ -198,6 +198,11 @@ private:
   // triggerCustomException() to avoid cross-thread register clobbering.
   std::atomic<uint8_t> vblankExceptionPending_{0};
 
+  // Last psyq_state().vsyncCounter value at which the libetc timer
+  // InterruptCallback handlers were ticked from drainPendingCallbacks.
+  // Game-thread only.
+  uint32_t lastIntrTickFrame_ = 0;
+
   // Internal generic state (game-agnostic)
   //
   // VBlank state migrated to `psyq_state().vsyncCounter` in Phase 2.2.

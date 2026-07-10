@@ -465,8 +465,11 @@ void Bios::drainPendingCallbacks() {
   if (period > 0) {
     long n = enter.fetch_add(1, std::memory_order_relaxed) + 1;
     if (n % period == 0) {
-      fmt::print(stderr, "[DRAIN] enter#{} (exits={})\n",
-                 n, exit.load(std::memory_order_relaxed));
+      // Host return address identifies WHICH emitted busy-loop is spinning
+      // (resolve with: addr2line -e ps1Runtime <addr>).
+      fmt::print(stderr, "[DRAIN] enter#{} (exits={}) caller={}\n", n,
+                 exit.load(std::memory_order_relaxed),
+                 fmt::ptr(__builtin_return_address(0)));
     }
   }
 
@@ -474,6 +477,27 @@ void Bios::drainPendingCallbacks() {
   // cdIntPending_ / cdExceptionPending_ / event-system state, which the
   // rest of this method then consumes.  Phase 3.3.
   drainCdromEventQueue();
+
+  // Tick libetc InterruptCallback handlers for the timer IRQs (I_STAT bits
+  // 4-6) once per VBlank.  Real root counters fire far more often, but the
+  // handlers registered here are completion pollers (e.g. Crash's sound
+  // engine ticks Timer0 to poll SPU transfer status and
+  // DeliverEvent(0xF0000009, 0x20)).  Delivered here rather than in
+  // triggerVBlankEvent because that only runs inside hle_VSync -- loading
+  // loops (Crash's NS_waitForAllLoads) spin without calling VSync while
+  // waiting for the very event these handlers deliver.
+  {
+    auto &st = ps1::psyq::psyq_state();
+    uint32_t frame = st.vsyncCounter.load(std::memory_order_relaxed);
+    if (frame != lastIntrTickFrame_) {
+      lastIntrTickFrame_ = frame;
+      for (std::size_t irq = 4; irq <= 6; ++irq) {
+        uint32_t cb = st.intrCallback[irq];
+        if (cb != 0)
+          eventSystem_.queueCallback(cb);
+      }
+    }
+  }
 
   eventSystem_.drainPendingCallbacks();
 
