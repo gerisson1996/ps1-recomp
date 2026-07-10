@@ -8,6 +8,9 @@
 #include <fmt/format.h>
 #include <unordered_set>
 
+// Declared by the generated recompiled_out.cpp (and the stub build).
+void recomp_dispatch(uint8_t *rdram, recomp_context *ctx, uint32_t addr);
+
 namespace ps1::psyq {
 
 namespace {
@@ -241,6 +244,79 @@ void hle_libgs_GsInitGraph(recomp_context *ctx) {
 void hle_libgs_GsDefDispBuff(recomp_context *ctx) {
   (void)ctx; warnOnceFor("libgs_GsDefDispBuff");
 }
+// checkRECT(log, rect) -- PSY-Q internal debug validator (GPU_printf on a
+// bad rect when info.level >= 1). Pure diagnostics; NOP matches the
+// release-mode behaviour (psyz decomp libgpu/sys.c:249).
+void hle_libgpu_checkRECT(recomp_context *ctx) { (void)ctx; }
+
+// _addque2(exec, p1, len, p2) -- PSY-Q internal GPU op queue (libgpu
+// sys.c). LoadImage/StoreImage/ClearImage/MoveImage enqueue their device
+// routine here; the real impl copies `len` bytes of p1 into a queue slot
+// and runs `exec(p1, p2)` when the GPU is idle. The runtime GPU is fully
+// synchronous, so the queue depth is effectively zero: execute the native
+// routine immediately and return its result in V0.
+void hle_libgpu__addque2(recomp_context *ctx) {
+  uint32_t exec = ctx->r[A0];
+  uint32_t p1   = ctx->r[A1];
+  uint32_t p2   = ctx->r[A3]; // (A2 = len, only needed for the deferred copy)
+  if (exec == 0) {
+    ctx->r[V0] = 0;
+    return;
+  }
+  uint32_t ra = ctx->r[RA];
+  ctx->r[A0] = p1;
+  ctx->r[A1] = p2;
+  recomp_dispatch(ctx->mem->ramPtr(), ctx, exec);
+  ctx->r[RA] = ra;
+}
+
+// _addque(exec, p1, p2) -- 3-arg sibling of _addque2 (no deferred copy).
+void hle_libgpu__addque(recomp_context *ctx) {
+  uint32_t exec = ctx->r[A0];
+  uint32_t p1   = ctx->r[A1];
+  uint32_t p2   = ctx->r[A2];
+  if (exec == 0) {
+    ctx->r[V0] = 0;
+    return;
+  }
+  uint32_t ra = ctx->r[RA];
+  ctx->r[A0] = p1;
+  ctx->r[A1] = p2;
+  recomp_dispatch(ctx->mem->ramPtr(), ctx, exec);
+  ctx->r[RA] = ra;
+}
+
+// _dws(rect*, data*) -- device write: the queued executor behind LoadImage
+// (CPU RAM -> VRAM). Identical argument layout to LoadImage.
+void hle_libgpu__dws(recomp_context *ctx) {
+  hle_libgpu_LoadImage(ctx);
+  ctx->r[V0] = 0;
+}
+
+// _drs(rect*, data*) -- device read: the executor behind StoreImage.
+void hle_libgpu__drs(recomp_context *ctx) {
+  hle_libgpu_StoreImage(ctx);
+  ctx->r[V0] = 0;
+}
+
+// _clr(rect*, color) -- the executor behind ClearImage/ClearImage2.
+// `color` is packed (b<<16)|(g<<8)|r; bit 31 selects the semi-transparent
+// variant which GP0(0x02) does not model, so it is masked off.
+void hle_libgpu__clr(recomp_context *ctx) {
+  PsyqRect r     = readRect(ctx, ctx->r[A0]);
+  uint32_t color = ctx->r[A1] & 0x00FFFFFFu;
+  if (r.w <= 0 || r.h <= 0) {
+    ctx->r[V0] = 0;
+    return;
+  }
+  writeGP0(0x02000000u | color);
+  writeGP0(static_cast<uint32_t>(r.y & 0xFFFF) << 16 |
+           static_cast<uint32_t>(r.x & 0xFFFF));
+  writeGP0(static_cast<uint32_t>(r.h & 0xFFFF) << 16 |
+           static_cast<uint32_t>(r.w & 0xFFFF));
+  ctx->r[V0] = 0;
+}
+
 void hle_libgs_GsSetWorkBase(recomp_context *ctx) {
   (void)ctx; warnOnceFor("libgs_GsSetWorkBase");
 }
@@ -264,6 +340,12 @@ void psyq_register_libgpu_extras() {
   psyq_register("libgpu_MoveImage",         &hle_libgpu_MoveImage);
   psyq_register("libgpu_ClearImage",        &hle_libgpu_ClearImage);
   psyq_register("libgpu_DrawSyncCallback",  &hle_libgpu_DrawSyncCallback);
+  psyq_register("libgpu_checkRECT",         &hle_libgpu_checkRECT);
+  psyq_register("libgpu__addque",           &hle_libgpu__addque);
+  psyq_register("libgpu__addque2",          &hle_libgpu__addque2);
+  psyq_register("libgpu__dws",              &hle_libgpu__dws);
+  psyq_register("libgpu__drs",              &hle_libgpu__drs);
+  psyq_register("libgpu__clr",              &hle_libgpu__clr);
   // VSyncCallback / SetVideoMode / GetVideoMode live in libetc per
   // psyq_signatures.toml (verified for v3.5/v4.0 LIBETC).
   psyq_register("libetc_VSyncCallback",     &hle_libgpu_VSyncCallback);
