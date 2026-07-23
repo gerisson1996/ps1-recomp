@@ -149,6 +149,9 @@ private:
   int32_t drawAreaY2_;
   bool ditherEnable_;
   uint8_t blendMode_; // 0: B/2+F/2, 1: B+F, 2: B-F, 3: B+F/4
+  // Current texture page from the last GP0(0xE1) draw-mode command. Sprites
+  // (GP0 0x64-0x7F) carry no tpage word of their own and sample from this.
+  uint16_t currentTexpage_;
 
   // Set once GP1(0x08) is received; renderer uses defaults until then.
   bool displayModeSet_;
@@ -212,6 +215,9 @@ private:
   // Rasterize a solid monochrome triangle
   void rasterizeTriangle(Vertex v0, Vertex v1, Vertex v2, Color16 c,
                          bool blend);
+
+  // Sample a single texel from VRAM (texture page + CLUT). raw==0 = transparent.
+  Color16 sampleTexel(int u, int v, uint16_t tpage, uint16_t clut) const;
 
   // Rasterize a textured triangle
   void rasterizeTexturedTriangle(Vertex v0, Vertex v1, Vertex v2, TexCoord t0,

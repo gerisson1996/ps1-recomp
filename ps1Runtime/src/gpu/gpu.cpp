@@ -34,6 +34,7 @@ void GPU::reset() {
   drawAreaX2_ = 1023;
   drawAreaY2_ = 511;
   ditherEnable_ = false;
+  currentTexpage_ = 0;
   displayModeSet_ = false;
   displayAreaSet_ = false;
 
@@ -753,6 +754,9 @@ void GPU::executeGP0Command() {
   case 0xE1: // Draw Mode / Texpage
     ditherEnable_ = (cmd & (1 << 9)) != 0;
     blendMode_ = (cmd >> 5) & 3;
+    // Bits 0-8 (tex page X/Y base, semi-transparency, color depth) are the
+    // current texture page used by textured sprites, which carry no tpage word.
+    currentTexpage_ = cmd & 0x1FF;
     break;
   case 0xE2: // Set Texture Window
     executeTextureWindow();
@@ -1223,21 +1227,71 @@ void GPU::executeRect() {
     break;
   }
 
+  // Textured sprites carry a UV base + CLUT in word[2] and sample from the
+  // current texture page (GP0 0xE1). Untextured rects use the flat command
+  // color. Prior to this, textured rects were filled with the command color
+  // (0x808080 neutral -> gray), so title/HUD sprites rendered as gray blocks.
+  int uBase = 0, vBase = 0;
+  uint16_t clut = 0;
+  if (isTextured) {
+    uBase = commandQueue_[2] & 0xFF;
+    vBase = (commandQueue_[2] >> 8) & 0xFF;
+    clut = (commandQueue_[2] >> 16) & 0xFFFF;
+  }
+
   for (int dy = 0; dy < h; ++dy) {
     for (int dx = 0; dx < w; ++dx) {
       int px = v.x + dx;
       int py = v.y + dy;
-      if (px >= drawAreaX1_ && px <= drawAreaX2_ && py >= drawAreaY1_ &&
-          py <= drawAreaY2_) {
-        uint32_t idx = (py % VRAM_HEIGHT) * VRAM_WIDTH + (px % VRAM_WIDTH);
-        Color16 finalColor = c16;
-        if (isBlend) {
-          finalColor = applyBlend(finalColor, vram_[idx]);
-        }
-        vram_[idx] = finalColor;
+      if (px < drawAreaX1_ || px > drawAreaX2_ || py < drawAreaY1_ ||
+          py > drawAreaY2_)
+        continue;
+      uint32_t idx = (py % VRAM_HEIGHT) * VRAM_WIDTH + (px % VRAM_WIDTH);
+      Color16 finalColor;
+      if (isTextured) {
+        Color16 texel = sampleTexel(uBase + dx, vBase + dy, currentTexpage_, clut);
+        if (texel.raw == 0)
+          continue; // fully-transparent texel
+        finalColor = texel; // raw texel (neutral command color = identity modulate)
+      } else {
+        finalColor = c16;
       }
+      if (isBlend)
+        finalColor = applyBlend(finalColor, vram_[idx]);
+      vram_[idx] = finalColor;
     }
   }
+}
+
+// Samples a single 16-bit texel from VRAM for the given texture page and CLUT,
+// honouring the E2 texture window. Returns raw==0 for a fully-transparent
+// texel (caller skips it). Mirrors the sampler in rasterizeTexturedTriangle.
+Color16 GPU::sampleTexel(int u, int v, uint16_t tpage, uint16_t clut) const {
+  if (texWindowMaskX_ != 0 || texWindowOffsetX_ != 0)
+    u = (u & ~texWindowMaskX_) | (texWindowOffsetX_ & texWindowMaskX_);
+  if (texWindowMaskY_ != 0 || texWindowOffsetY_ != 0)
+    v = (v & ~texWindowMaskY_) | (texWindowOffsetY_ & texWindowMaskY_);
+
+  uint32_t tpX = (tpage & 0xF) * 64;
+  uint32_t tpY = ((tpage >> 4) & 1) * 256;
+  uint32_t depth = (tpage >> 7) & 3;
+  uint32_t clutX = (clut & 0x3F) * 16;
+  uint32_t clutY = (clut >> 6) & 0x1FF;
+
+  if (depth == 0) { // 4-bit CLUT
+    uint32_t tx = tpX + (u / 4), ty = tpY + v;
+    uint16_t block = vram_[(ty % VRAM_HEIGHT) * VRAM_WIDTH + (tx % VRAM_WIDTH)].raw;
+    uint8_t index = (block >> ((u % 4) * 4)) & 0xF;
+    return vram_[(clutY % VRAM_HEIGHT) * VRAM_WIDTH + ((clutX + index) % VRAM_WIDTH)];
+  } else if (depth == 1) { // 8-bit CLUT
+    uint32_t tx = tpX + (u / 2), ty = tpY + v;
+    uint16_t block = vram_[(ty % VRAM_HEIGHT) * VRAM_WIDTH + (tx % VRAM_WIDTH)].raw;
+    uint8_t index = (block >> ((u % 2) * 8)) & 0xFF;
+    return vram_[(clutY % VRAM_HEIGHT) * VRAM_WIDTH + ((clutX + index) % VRAM_WIDTH)];
+  }
+  // 15-bit direct
+  uint32_t tx = tpX + u, ty = tpY + v;
+  return vram_[(ty % VRAM_HEIGHT) * VRAM_WIDTH + (tx % VRAM_WIDTH)];
 }
 
 void GPU::executeClearCache() {
