@@ -101,4 +101,9 @@ void hle_SetDefDrawEnv(recomp_context *ctx);
 /// a0=*DrawEnv
 void hle_PutDrawEnv(recomp_context *ctx);
 
+/// GOOL bytecode VM entry (Crash Bandicoot, native 0x800201DC).
+/// a0=*goolobj, a1=flags, a2=*goolstateref. Wired through [hle_overrides]
+/// so direct JAL callers reach it. Implemented in src/gool/gool_interp.cpp.
+void hle_gool_InterpretObject(recomp_context *ctx);
+
 } // namespace ps1::psyq
