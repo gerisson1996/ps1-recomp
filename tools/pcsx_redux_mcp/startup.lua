@@ -1,9 +1,10 @@
 -- PCSX-Redux startup script for PSXRecomp debugging
--- Load via Lua Console: loadfile("F:/Projects/psxrecomp-v2/tools/pcsx_redux_mcp/startup.lua")()
+-- Load via Lua Console:
+--   loadfile("/home/dellareti/Documents/github/Italo Dell Areti/ps1-recomp/tools/pcsx_redux_mcp/startup.lua")()
 -- Requires emulation running (GPU::Vsync fires once per frame).
 
-local CMD_FILE    = "C:/temp/pcsx_cmd.lua"
-local RESULT_FILE = "C:/temp/pcsx_result.txt"
+local CMD_FILE    = "/tmp/pcsx_cmd.lua"
+local RESULT_FILE = "/tmp/pcsx_result.txt"
 
 -- Must be stored in a global to prevent garbage collection
 _psxrecomp_listener = PCSX.Events.createEventListener("GPU::Vsync", function()
