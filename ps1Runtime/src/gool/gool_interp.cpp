@@ -30,6 +30,7 @@
 #include "runtime/cpu_context.h"
 #include "runtime/emu_globals.h"
 #include "runtime/emuptr.h"
+#include "runtime/metrics.h"
 #include "runtime/psyq/psyq_hle.h"
 
 #include <cstddef>
@@ -620,6 +621,9 @@ void opChangeAnimFrame(emuptr<goolobj> obj, uint32_t ins, uint32_t &flags) {
 void opNotPorted(emuptr<goolobj> obj, uint32_t ins) {
   static bool warned[256] = {};
   uint32_t opcode = opcodeOf(ins);
+  char mname[32];
+  std::snprintf(mname, sizeof(mname), "gool.opcode_missing.%02X", opcode);
+  ps1::metrics::count(mname);
   if (!warned[opcode]) {
     warned[opcode] = true;
     std::fprintf(stderr,
@@ -635,6 +639,7 @@ void opNotPorted(emuptr<goolobj> obj, uint32_t ins) {
 uint32_t interpretObject(emuptr<goolobj> obj, uint32_t flags,
                          emuptr<goolstateref> transition) {
   nativeEnter();
+  ps1::metrics::count("gool.interpret");
 
   emuptr<goolobj> recipient{};
   uint32_t argbuf = 0;

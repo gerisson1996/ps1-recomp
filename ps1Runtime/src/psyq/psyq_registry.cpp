@@ -8,6 +8,7 @@
 #include "runtime/psyq/psyq_libgpu.h"
 #include "runtime/psyq/psyq_libgte.h"
 #include "runtime/psyq/psyq_pad.h"
+#include "runtime/metrics.h"
 
 #include <cstdlib>
 #include <cstring>
@@ -74,6 +75,11 @@ void psyq_dispatch(const char *name, recomp_context *ctx) {
                "implementation registered (RA=0x{:08X})\n",
                name, ctx->r[31]);
     std::abort();
+  }
+  if (ps1::metrics::enabled()) {
+    std::string key = "hle.";
+    key += name;
+    ps1::metrics::count(key);
   }
   it->second(ctx);
 }
