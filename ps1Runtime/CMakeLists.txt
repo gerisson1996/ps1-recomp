@@ -4,6 +4,7 @@ find_package(OpenGL REQUIRED)
 # Runtime library (shared between exe and tests)
 add_library(ps1Runtime_lib STATIC
     src/gte.cpp
+    src/metrics.cpp
     src/gool/emu_compat.cpp
     src/gool/gool_interp.cpp
     src/cdrom/cue_parser.cpp

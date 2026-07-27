@@ -100,6 +100,7 @@ add_executable(ps1Runtime_tests
     runtime/test_psyq_pad.cpp
     runtime/test_psyq_libc.cpp
     runtime/test_psyq_state.cpp
+    runtime/test_metrics.cpp
 )
 
 target_include_directories(ps1Runtime_tests
