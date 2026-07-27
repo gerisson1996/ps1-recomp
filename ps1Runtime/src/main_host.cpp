@@ -29,6 +29,7 @@
 #include <runtime/input/input.h>
 #include <runtime/mdec/mdec.h>
 #include <runtime/memory.h>
+#include <runtime/metrics.h>
 #include <runtime/spu/spu.h>
 #include <runtime/timers/timers.h>
 #include <string>
@@ -653,6 +654,7 @@ int main(int argc, char *argv[]) {
     renderer.renderFrame();
 
     frameCount++;
+    ps1::metrics::count("frames");
 
     // Status every 5 seconds
     if (frameCount % 300 == 0) {
@@ -679,6 +681,7 @@ int main(int argc, char *argv[]) {
   if (const char *vramDump = std::getenv("PS1_VRAM_DUMP_PATH")) {
     dumpVramPpm(gpu, vramDump);
   }
+  ps1::metrics::dumpJson();
 
   // Cleanup
 
@@ -702,6 +705,7 @@ int main(int argc, char *argv[]) {
       fmt::print("[Main] Game thread did not finish in 2s -- forcing exit "
                  "(skipping destructors to avoid UAF race)\n");
       fmt::print("Simulation ended after {} frames.\n", frameCount);
+      ps1::metrics::dumpJson();
       std::_Exit(0);
     }
   }
