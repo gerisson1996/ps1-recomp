@@ -460,6 +460,10 @@ int main(int argc, char *argv[]) {
   std::atomic<bool> gameFinished{false};
   std::atomic<bool> gameThreadDone{false};
   uint64_t frameCount = 0;
+  // Set once PS1_VRAM_DUMP_FRAME has been honoured, so the shutdown dump does
+  // not overwrite the requested frame -- both write PS1_VRAM_DUMP_PATH, and
+  // the shutdown VRAM is exactly the freshly-cleared state we are avoiding.
+  bool frameDumpWritten = false;
 
   // Initialize dispatch table before starting the game
   recomp_init_dispatch_table();
@@ -668,7 +672,8 @@ int main(int argc, char *argv[]) {
     if (const char *atFrame = std::getenv("PS1_VRAM_DUMP_FRAME")) {
       if (frameCount == std::strtoull(atFrame, nullptr, 10)) {
         const char *path = std::getenv("PS1_VRAM_DUMP_PATH");
-        dumpVramPpm(gpu, path ? path : "/tmp/vram_frame.ppm");
+        frameDumpWritten =
+            dumpVramPpm(gpu, path ? path : "/tmp/vram_frame.ppm");
       }
     }
 
@@ -695,7 +700,8 @@ int main(int argc, char *argv[]) {
   }
 
   if (const char *vramDump = std::getenv("PS1_VRAM_DUMP_PATH")) {
-    dumpVramPpm(gpu, vramDump);
+    if (!frameDumpWritten)
+      dumpVramPpm(gpu, vramDump);
   }
   gpu.publishMetrics();
   ps1::metrics::dumpJson();
