@@ -137,17 +137,24 @@ static bool dumpVramPpm(const ps1::gpu::GPU &gpu, const char *path) {
   std::fprintf(f, "P6\n%u %u\n255\n", W, H);
   const ps1::gpu::Color16 *vram = gpu.getVRAM();
   std::vector<uint8_t> row(W * 3);
+  uint64_t nonZero = 0;
   for (uint32_t y = 0; y < H; ++y) {
     for (uint32_t x = 0; x < W; ++x) {
       uint16_t p = vram[y * W + x].raw;
       row[x * 3 + 0] = static_cast<uint8_t>((p & 0x1F) << 3);
       row[x * 3 + 1] = static_cast<uint8_t>(((p >> 5) & 0x1F) << 3);
       row[x * 3 + 2] = static_cast<uint8_t>(((p >> 10) & 0x1F) << 3);
+      if (p != 0)
+        ++nonZero;
     }
     std::fwrite(row.data(), 1, row.size(), f);
   }
   std::fclose(f);
-  fmt::print("[VRAM-DUMP] wrote {} ({}x{})\n", path, W, H);
+  ps1::metrics::count("vram_dump.written");
+  ps1::metrics::setState("vram_dump.nonzero_pixels",
+                         static_cast<int64_t>(nonZero));
+  fmt::print("[VRAM-DUMP] wrote {} ({}x{}), {} non-zero pixels\n", path, W, H,
+             nonZero);
   return true;
 }
 
@@ -655,6 +662,15 @@ int main(int argc, char *argv[]) {
 
     frameCount++;
     ps1::metrics::count("frames");
+
+    // Capture at a chosen frame, not only at shutdown: the game clears VRAM
+    // every frame, so a shutdown-only dump always catches it freshly wiped.
+    if (const char *atFrame = std::getenv("PS1_VRAM_DUMP_FRAME")) {
+      if (frameCount == std::strtoull(atFrame, nullptr, 10)) {
+        const char *path = std::getenv("PS1_VRAM_DUMP_PATH");
+        dumpVramPpm(gpu, path ? path : "/tmp/vram_frame.ppm");
+      }
+    }
 
     // Status every 5 seconds
     if (frameCount % 300 == 0) {
