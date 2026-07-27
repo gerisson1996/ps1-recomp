@@ -681,6 +681,7 @@ int main(int argc, char *argv[]) {
   if (const char *vramDump = std::getenv("PS1_VRAM_DUMP_PATH")) {
     dumpVramPpm(gpu, vramDump);
   }
+  gpu.publishMetrics();
   ps1::metrics::dumpJson();
 
   // Cleanup
@@ -705,6 +706,7 @@ int main(int argc, char *argv[]) {
       fmt::print("[Main] Game thread did not finish in 2s -- forcing exit "
                  "(skipping destructors to avoid UAF race)\n");
       fmt::print("Simulation ended after {} frames.\n", frameCount);
+      gpu.publishMetrics();
       ps1::metrics::dumpJson();
       std::_Exit(0);
     }

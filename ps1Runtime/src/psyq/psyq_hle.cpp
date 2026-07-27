@@ -1,6 +1,7 @@
 #include "runtime/psyq/psyq_hle.h"
 #include "runtime/emuptr.h"
 #include "runtime/memory.h"
+#include "runtime/metrics.h"
 #include "runtime/psyq/psyq_state.h"
 #include <chrono>
 #include <fmt/format.h>
@@ -157,11 +158,14 @@ void hle_DrawOTag(recomp_context *ctx) {
     ctx->r[V0] = 0;
     return;
   }
+  ps1::metrics::count("draw_otag.calls");
   uint32_t ptr = ctx->r[A0];
   int safety = 0;
   while ((ptr & 0xFFFFFFu) != 0xFFFFFFu && safety++ < 100000) {
     uint32_t hdr = ctx->mem->read32(ptr);
     uint32_t wordCount = (hdr >> 24) & 0xFF;
+    ps1::metrics::count("draw_otag.nodes");
+    ps1::metrics::count("draw_otag.words", wordCount);
     for (uint32_t i = 0; i < wordCount; i++) {
       g_cfg.writeGP0(ctx->mem->read32(ptr + 4 + i * 4));
     }
