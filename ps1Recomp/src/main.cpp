@@ -722,18 +722,6 @@ int main(int argc, char *argv[]) {
     result_cpp += "    return (it != recomp_func_table.end()) ? it->second : nullptr;\n";
     result_cpp += "}\n\n";
 
-    // Override registration: lets a host replace any function entry with a
-    // C++ stub at runtime, without modifying the generated source.
-    //
-    // Currently has no callers.  Its only user was the env-gated
-    // PS1_SKIP_31BF8 patch in main_host.cpp, dropped in 2026-07 once the GOOL
-    // interpreter made it unnecessary.  Note that `[hle_overrides]` does NOT
-    // go through here -- that substitution happens at emit time, above.
-    result_cpp += "void recomp_register_override(uint32_t addr, recomp_func_t fn) {\n";
-    result_cpp += "    if (!recomp_table_ready) recomp_init_dispatch_table();\n";
-    result_cpp += "    recomp_func_table[addr] = fn;\n";
-    result_cpp += "}\n\n";
-
     // Main dispatch function
     result_cpp += "void recomp_dispatch(uint8_t* rdram, recomp_context* ctx, "
                   "uint32_t addr) {\n";
