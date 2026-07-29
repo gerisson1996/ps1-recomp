@@ -335,6 +335,26 @@ void hle_SetDefDrawEnv(recomp_context *ctx) {
 //     GP0(0xE4) -- drawing area bottom-right
 //     GP0(0xE5) -- drawing offset
 //
+// Audited 2026-07-28 against the psyz decomp reference (workspace clone,
+// PS1Recomp-workspace/psyz/decomp/src/libgpu/sys.c): PutDrawEnv builds its
+// GP0(0xE1) word via SetDrawEnv2 -> get_mode(env->dfe, env->dtd, env->tpage)
+// (sys.c:362-373, 561-573), the same get_mode() this project's SetDrawMode
+// audit already confirmed (sys.c:624-632, retail/1MB-VRAM branch --
+// info.version 0/3, applicable to this target per that audit):
+//   (dtd ? 0xE1000200 : 0xE1000000) | (dfe ? 0x400 : 0) | (tpage & 0x9FF)
+// The pre-audit implementation read only dtd and masked tpage with 0x7FF
+// (bits 0-10) instead of 0x9FF (bits 0-8 + bit 11). Per psx-spx (GP0(E1h)),
+// bits 9-10 are exclusively Dither/Draw-to-display-area, supplied by
+// dtd/dfe -- never by the raw tpage value -- so 0x7FF let stray high bits of
+// env->tpage leak into those flags, and env->dfe (DRAWENV +0x17, offset 23;
+// psyz/include/libgpu.h:565-575) was never read at all.
+//
+// Known gap (not fixed in this pass): SetDrawEnv2 always also emits
+// GP0(0xE2) Texture Window and GP0(0xE6) Mask Bit Setting (sys.c:574-575,
+// 601), which this implementation still does not. Fixing that would change
+// this function's GP0 word count, which would break test_psyq_hle.cpp's
+// exact-size assertions -- a file outside this task's edit scope. Left
+// documented for a follow-up that can touch that file.
 void hle_PutDrawEnv(recomp_context *ctx) {
   if (!g_cfg.writeGP0) {
     return;
@@ -348,9 +368,11 @@ void hle_PutDrawEnv(recomp_context *ctx) {
   int16_t oy  = static_cast<int16_t>(ctx->mem->read16(envPtr + 10));
   uint16_t tpage = ctx->mem->read16(envPtr + 20);
   uint8_t dtd = ctx->mem->read8(envPtr + 22);
+  uint8_t dfe = ctx->mem->read8(envPtr + 23);
 
-  // GP0(0xE1): texture page + dithering
-  uint32_t e1 = 0xE1000000u | (tpage & 0x7FFu) | (static_cast<uint32_t>(dtd) << 9);
+  // GP0(0xE1): texture page + dithering + draw-to-display-area enable
+  uint32_t e1 = (dtd ? 0xE1000200u : 0xE1000000u) |
+                (dfe ? 0x400u : 0u) | (tpage & 0x9FFu);
   g_cfg.writeGP0(e1);
 
   // GP0(0xE3): drawing area top-left

@@ -499,6 +499,81 @@ TEST_F(PsyqGpuTest, GetTPageEncodesYBit8AndBit11FromSource) {
   }
 }
 
+// PutDrawEnv
+//
+// PutDrawEnv(env) builds a DR_ENV command block via SetDrawEnv2 (psyz decomp
+// src/libgpu/sys.c:362-373, 561-620) and queues it through addque2/cwc; the
+// GP0(0xE1) word it produces comes from the same get_mode() helper
+// SetDrawMode uses (sys.c:509-521, 573; retail/1MB-VRAM branch at
+// sys.c:628-631, confirmed applicable to this target in the SetDrawMode
+// audit above):
+//   (dtd ? 0xE1000200 : 0xE1000000) | (dfe ? 0x400 : 0) | (tpage & 0x9FF)
+// DRAWENV's field layout (psyz/include/libgpu.h:565-575) confirms dfe lives
+// at +0x17 (offset 23, right after dtd at +0x16/offset 22) -- both already
+// documented in this file's SetDefDrawEnv comment.
+//
+// Audited 2026-07-28: the pre-audit hle_PutDrawEnv (psyq_hle.cpp) read only
+// dtd and masked tpage with 0x7FF (bits 0-10) instead of 0x9FF (bits 0-8 +
+// bit 11). Per psx-spx (GP0(E1h), workspace clone
+// PS1Recomp-workspace/psx-spx.github.io/docs/graphicsprocessingunitgpu.md:
+// 376-388), bits 9-10 of GP0(E1h) are exclusively "Dither" and "Drawing to
+// display area allowed" -- supplied by dtd/dfe, never by the raw tpage
+// value -- so 0x7FF let stray high bits of env->tpage leak into those two
+// flags, and dfe (env->dfe, offset 23) was never read or encoded at all.
+// This is the same mask this audit's Task 2 pass already applied to
+// SetDrawMode (test_psyq_gpu.cpp above); PutDrawEnv had drifted from it.
+//
+// GP0(0xE2) Texture Window and GP0(0xE6) Mask Bit Setting: SetDrawEnv2 always
+// emits both (sys.c:574, 575/601), and the header comment above already
+// claimed GP0(0xE2) -- but the implementation never emitted either. Fixing
+// that here would add GP0 words to hle_PutDrawEnv's output, which would
+// break test_psyq_hle.cpp's PutDrawEnvEmitsGP0Commands /
+// PutDrawEnvBottomRightEncoding (exact `gp0Words.size()==4` assertions) --
+// a file outside this task's edit scope. Left as a documented, confirmed gap
+// for a follow-up that can touch that file; not fixed in this pass.
+
+TEST_F(PsyqGpuTest, PutDrawEnvMasksTpageAndDropsStrayDtdDfeBitsFromRawValue) {
+  const uint32_t env = 0x80100000u;
+  // clip/offset arbitrary but valid; the assertion is on the E1 word only.
+  writeRect(env, 0, 0, 320, 240);       // clip.x/y/w/h at +0
+  mem.write16(env + 8, 0);              // ofs.x
+  mem.write16(env + 10, 0);             // ofs.y
+  // tpage has every bit 0-10 set, including the two (9,10) that PsyQ
+  // reserves exclusively for dtd/dfe -- a real DRAWENV should never carry
+  // them, but nothing stops stray bits from surviving if the mask is wrong.
+  mem.write16(env + 20, 0x7FFu);        // tpage
+  mem.write8(env + 22, 0);              // dtd = 0
+  mem.write8(env + 23, 0);              // dfe = 0
+
+  ctx.r[A0] = env;
+  hle_PutDrawEnv(&ctx);
+
+  ASSERT_FALSE(gp0.empty());
+  EXPECT_EQ(gp0[0] >> 24, 0xE1u);
+  // get_mode(dfe=0, dtd=0, tpage=0x7FF) = 0xE1000000 | (0x7FF & 0x9FF)
+  //                                     = 0xE10001FF
+  EXPECT_EQ(gp0[0], 0xE10001FFu)
+      << "tpage bits 9-10 (dtd/dfe-reserved) must not leak through unmasked";
+}
+
+TEST_F(PsyqGpuTest, PutDrawEnvEncodesDfeBitFromEnv) {
+  const uint32_t env = 0x80100000u;
+  writeRect(env, 0, 0, 320, 240);
+  mem.write16(env + 8, 0);
+  mem.write16(env + 10, 0);
+  mem.write16(env + 20, 0);   // tpage = 0
+  mem.write8(env + 22, 0);    // dtd = 0
+  mem.write8(env + 23, 1);    // dfe = 1 (draw-to-display-area enable)
+
+  ctx.r[A0] = env;
+  hle_PutDrawEnv(&ctx);
+
+  ASSERT_FALSE(gp0.empty());
+  // get_mode(dfe=1, dtd=0, tpage=0) = 0xE1000000 | 0x400 = 0xE1000400
+  EXPECT_EQ(gp0[0], 0xE1000400u)
+      << "env->dfe (offset 23) must reach GP0(E1) bit 10, per get_mode";
+}
+
 // Registry wiring
 
 TEST_F(PsyqGpuTest, RegistryDispatchesAllNewNames) {
