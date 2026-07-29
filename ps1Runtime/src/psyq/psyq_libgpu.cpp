@@ -265,11 +265,23 @@ void hle_libgs_GsDefDispBuff(recomp_context *ctx) {
 void hle_libgpu_checkRECT(recomp_context *ctx) { (void)ctx; }
 
 // _addque2(exec, p1, len, p2) -- PSY-Q internal GPU op queue (libgpu
-// sys.c). LoadImage/StoreImage/ClearImage/MoveImage enqueue their device
-// routine here; the real impl copies `len` bytes of p1 into a queue slot
-// and runs `exec(p1, p2)` when the GPU is idle. The runtime GPU is fully
-// synchronous, so the queue depth is effectively zero: execute the native
-// routine immediately and return its result in V0.
+// sys.c). LoadImage/StoreImage/ClearImage/MoveImage/DrawOTag/PutDrawEnv all
+// enqueue their device routine here. On real hardware `len` bytes of p1 are
+// queued and `exec(p1, p2)` runs once the GPU is idle. The declaration-only
+// _addque2 in sys.c (`INCLUDE_ASM(...)`, sys.c:866) has no decompiled body,
+// but psyz's PC reimplementation of the same driver struct entry -- an
+// admissible source clone under this project's rules -- gives its semantics
+// unambiguously (psyz/psyz/src/psyz/libgpu.c:178-181):
+//   static int psyz_addque2(int (*exec)(u_long,u_long), u_long p1, int len,
+//                            u_long p2) { return exec(p1, p2); }
+// i.e. `len` (a2) is dead, and V0 must carry whatever `exec` returns, not a
+// value _addque2 itself decides. Audited 2026-07-28: this HLE already
+// matches -- exec runs with (p1, p2) in (a0, a1) and V0 is left untouched
+// afterward, so it naturally carries exec's result through recomp_dispatch.
+// The `exec == 0` guard is a defensive addition with no source counterpart
+// (real code has no null check); harmless because every real caller in this
+// codebase (LoadImage/_dws, StoreImage/_drs, ClearImage/_clr, DrawOTag's and
+// PutDrawEnv's cwc) always passes a valid function pointer.
 void hle_libgpu__addque2(recomp_context *ctx) {
   uint32_t exec = ctx->r[A0];
   uint32_t p1   = ctx->r[A1];

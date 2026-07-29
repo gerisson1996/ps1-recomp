@@ -166,6 +166,48 @@ TEST_F(PsyqGpuTest, DwsDispatchesLikeLoadImageAndReturnsZero) {
   EXPECT_EQ(ctx.r[V0], 0u);
 }
 
+// _addque2
+//
+// _addque2(exec, p1, len, p2) has no decompiled body in sys.c (it is
+// `INCLUDE_ASM`-only, sys.c:866), but psyz's PC reimplementation of the same
+// driver struct entry -- an admissible source clone -- gives its semantics
+// unambiguously: psyz/psyz/src/psyz/libgpu.c:178-181,
+//   static int psyz_addque2(int (*exec)(u_long,u_long), u_long p1, int len,
+//                            u_long p2) { return exec(p1, p2); }
+// `len` (a2) is unused, and the return value must be whatever `exec`
+// returns via V0 -- not a value _addque2 itself decides. The test build's
+// recomp_dispatch (test_stubs.cpp) is a no-op, which is actually useful
+// here: since it never touches ctx, a V0 sentinel set before the call
+// survives only if hle_libgpu__addque2 does not overwrite it itself.
+
+TEST_F(PsyqGpuTest, AddQue2ForwardsP1AndP2ToExecArgsAndPreservesReturnValue) {
+  psyq_register_libgpu_extras();
+  ctx.r[A0] = 0x80012340u; // exec (nonzero -- must not take the null path)
+  ctx.r[A1] = 0x80100000u; // p1
+  ctx.r[A2] = 0x99u;       // len -- must be ignored (a2 is dead per source)
+  ctx.r[A3] = 0x80200000u; // p2
+  ctx.r[RA] = 0x80099999u;
+  ctx.r[V0] = 0xDEADBEEFu; // sentinel: a real exec would set this via V0
+
+  psyq_dispatch("libgpu__addque2", &ctx);
+
+  EXPECT_EQ(ctx.r[A0], 0x80100000u) << "p1 must land in exec's a0";
+  EXPECT_EQ(ctx.r[A1], 0x80200000u) << "p2 (a3, not a2=len) must land in exec's a1";
+  EXPECT_EQ(ctx.r[V0], 0xDEADBEEFu)
+      << "V0 must come from exec, not be hardcoded by _addque2 itself";
+  EXPECT_EQ(ctx.r[RA], 0x80099999u) << "RA must be restored after the call";
+}
+
+TEST_F(PsyqGpuTest, AddQue2NullExecReturnsZeroWithoutTouchingArgs) {
+  psyq_register_libgpu_extras();
+  ctx.r[A0] = 0; // exec = NULL
+  ctx.r[A1] = 0x80100000u;
+  ctx.r[A3] = 0x80200000u;
+  ctx.r[V0] = 0xDEADBEEFu;
+  psyq_dispatch("libgpu__addque2", &ctx);
+  EXPECT_EQ(ctx.r[V0], 0u);
+}
+
 // StoreImage
 
 TEST_F(PsyqGpuTest, StoreImageEmitsVramToCpuHeader) {
