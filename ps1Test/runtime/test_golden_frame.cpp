@@ -122,11 +122,16 @@ TEST(GoldenFrame, CrashRendersContentAtFrame200) {
   EXPECT_GT(n, 0) << "VRAM is entirely black at frame 200";
 
   // Content check.  A cleared screen scores exactly 4 colours in this band;
-  // the Universal Interactive Studios boot screen scored 173..300 across three
-  // runs on 2026-07-28.  The bound sits well below that spread and well above
-  // a clear, so it fails on a blank screen without being flaky.  The spread
-  // itself is real run-to-run variance and is Phase 2 R4 work, not a reason to
-  // widen this bound further.
+  // the Universal Interactive Studios boot screen scored 300..477 across five
+  // runs on 2026-07-28, four of them byte-identical at 300.  The bound sits far
+  // below that and far above a clear, so it fails on a blank screen without
+  // being flaky.
+  //
+  // That reproducibility depends on PS1_VRAM_DUMP_FRAME counting VBlanks rather
+  // than host render-loop iterations.  Anchored on the render loop the same
+  // five runs scored 16..119, because the loop's rate follows compositor load
+  // while the game advances on a steady 60 Hz -- so "frame 200" landed on a
+  // different point of the intro each time.
   const long colours = countBandColours(ppm);
   ASSERT_GE(colours, 0) << "VRAM capture missing or malformed at " << ppm;
   EXPECT_GT(colours, 50)

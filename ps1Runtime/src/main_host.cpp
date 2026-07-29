@@ -652,8 +652,18 @@ int main(int argc, char *argv[]) {
 
     // Capture at a chosen frame, not only at shutdown: the game clears VRAM
     // every frame, so a shutdown-only dump always catches it freshly wiped.
+    //
+    // The threshold counts VBlanks, not iterations of this loop.  This loop is
+    // paced by the SDL renderer's vsync and has been measured anywhere from 39
+    // to 59 iterations per second depending on compositor load, while the game
+    // thread advances on the steady 60 Hz vblankThread.  Anchoring on
+    // frameCount therefore captured a different point of the intro on every
+    // run -- sometimes the logo screen, sometimes the black gap after it --
+    // which is what made the golden frame look non-deterministic.
     if (const char *atFrame = std::getenv("PS1_VRAM_DUMP_FRAME")) {
-      if (frameCount == std::strtoull(atFrame, nullptr, 10)) {
+      const uint32_t vblanks =
+          ps1::psyq::psyq_state().vsyncCounter.load(std::memory_order_acquire);
+      if (!frameDumpWritten && vblanks >= std::strtoul(atFrame, nullptr, 10)) {
         const char *path = std::getenv("PS1_VRAM_DUMP_PATH");
         frameDumpWritten =
             dumpVramPpm(gpu, path ? path : "/tmp/vram_frame.ppm");
