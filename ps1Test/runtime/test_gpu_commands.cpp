@@ -70,6 +70,45 @@ TEST_F(GpuCommandTest, GP0FillRectFillsArea) {
   EXPECT_EQ(vram[20 * GPU::VRAM_WIDTH + 9].raw, 0);  // Outside left
 }
 
+// GP0(02h) does not share the A0h/C0h "zero means the full dimension" rule: a
+// zero width or height fills nothing.  Reading a zero height as 512 made the
+// game's per-frame clear at y=12 wrap past the bottom of VRAM and erase the
+// texture pages at y=384..511, so every textured sprite sampled transparent
+// texels and the screen stayed black.
+TEST_F(GpuCommandTest, GP0FillRectWithZeroHeightFillsNothing) {
+  // Seed a pixel inside the region a wrapping 512-row fill would have reached.
+  gpu.writeGP0(0x020000FF);
+  gpu.writeGP0((400 << 16) | 600); // (600,400) -- texture-page territory
+  gpu.writeGP0((1 << 16) | 1);     // 1x1
+  const Color16 *vram = gpu.getVRAM();
+  const uint16_t seeded = vram[400 * GPU::VRAM_WIDTH + 600].raw;
+  ASSERT_NE(seeded, 0) << "seed fill did not land; test cannot detect the wipe";
+
+  // Height field of 0: the clear the game actually issues.
+  gpu.writeGP0(0x02000000);
+  gpu.writeGP0((12 << 16) | 512); // (512,12), as observed in Crash
+  gpu.writeGP0((0 << 16) | 512);  // 512 wide, height field 0
+
+  EXPECT_EQ(vram[400 * GPU::VRAM_WIDTH + 600].raw, seeded)
+      << "zero-height fill wrapped and wiped the texture page region";
+}
+
+TEST_F(GpuCommandTest, GP0FillRectWithZeroWidthFillsNothing) {
+  gpu.writeGP0(0x020000FF);
+  gpu.writeGP0((100 << 16) | 100);
+  gpu.writeGP0((1 << 16) | 1);
+  const Color16 *vram = gpu.getVRAM();
+  const uint16_t seeded = vram[100 * GPU::VRAM_WIDTH + 100].raw;
+  ASSERT_NE(seeded, 0);
+
+  gpu.writeGP0(0x02000000);
+  gpu.writeGP0((100 << 16) | 100);
+  gpu.writeGP0((8 << 16) | 0); // width field 0, height 8
+
+  EXPECT_EQ(vram[100 * GPU::VRAM_WIDTH + 100].raw, seeded)
+      << "zero-width fill was treated as 1024 wide";
+}
+
 TEST_F(GpuCommandTest, GP1DMADirectionUpdatesGPUSTAT) {
   uint32_t initialStat = gpu.readGPUSTAT();
 

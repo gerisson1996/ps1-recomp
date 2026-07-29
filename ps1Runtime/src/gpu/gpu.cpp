@@ -1313,11 +1313,25 @@ void GPU::executeFillRect() {
 
   uint32_t x = pos & 0x3FF;
   uint32_t y = (pos >> 16) & 0x1FF;
+  // GP0(02h) size semantics differ from the A0h/C0h transfer commands: there a
+  // zero dimension means "the full 1024/512", here it means "fill nothing".
+  // Width rounds up to a multiple of 16, height is masked to 9 bits (psx-spx,
+  // Fill Rectangle in VRAM).
+  //
+  // Treating a zero height as 512 is what erased the game's texture pages: the
+  // per-frame clear at (0,12)/(512,12) became 512 rows tall, wrapped past the
+  // bottom of VRAM through the `% VRAM_HEIGHT` below, and wiped y=384..511 --
+  // exactly where the two 256x128 texture pages are uploaded. Sprites then
+  // sampled transparent texels and drew nothing.
+  // Deviation left in place deliberately: psx-spx also rounds the width up to a
+  // multiple of 16. That is not done here because no observed command needs it,
+  // and applying it would widen every small fill (a 5px request becomes 16px).
   uint32_t w = size & 0x3FF;
-  // width/height of 0 means 1024/512
-  w = ((w - 1) & 0x3FF) + 1;
   uint32_t h = (size >> 16) & 0x1FF;
-  h = ((h - 1) & 0x1FF) + 1;
+  if (w == 0 || h == 0) {
+    ps1::metrics::count("fill_rect_zero");
+    return;
+  }
 
   static int fillCount = 0;
   if (++fillCount <= 10)
