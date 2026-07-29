@@ -314,6 +314,101 @@ TEST_F(PsyqGpuTest, SetDrawModeEncodesTextureWindowRectIntoGp0Word) {
   EXPECT_EQ(mem.read32(p + 8), expected);
 }
 
+// GetTPage
+//
+// GetTPage(tp, abr, x, y) packs a texpage description into the u_short that
+// feeds SetDrawMode's `tpage` argument (see the SetDrawMode tests above) --
+// an error here reintroduces the same wrong-texpage symptom through a
+// different HLE. Encoding confirmed against the psyz decomp reference
+// (workspace clone, PS1Recomp-workspace/psyz/): GetTPage forwards directly
+// to the getTPage() macro (decomp/src/libgpu/prim.c:5-6 -- `return
+// getTPage(tp, abr, x, y);`), defined at psyz/include/libgpu.h:183-185:
+//   #define getTPage(tp, abr, x, y) \
+//       ((((tp) & 0x3) << 7) | (((abr) & 0x3) << 5) | (((y) & 0x100) >> 4) | \
+//        (((x) & 0x3ff) >> 6) | (((y) & 0x200) << 2))
+// This is byte-for-byte what ps1Runtime's HLE already computes.
+//
+// Bit 11 (the `(y & 0x200) << 2` term) is psx-spx's GP0(E1h) "Texture page Y
+// Base 2 (N*512), only for 2 MB VRAM" (workspace clone,
+// PS1Recomp-workspace/psx-spx.github.io/docs/graphicsprocessingunitgpu.md:385,
+// 899). It is part of the confirmed PsyQ macro -- the source does not mask
+// it out -- so it stays. It is inert on this project's target: SetDrawMode
+// already forwards it unmasked (`tpage & 0x9FF`), but gpu.cpp separately
+// discards bit 11 when latching the mode word (`currentTexpage_ = cmd &
+// 0x1FF`, gpu.cpp:766), and this target's y coordinates never reach 512, so
+// no rendering path currently observes it (2026-07-22 project finding).
+// Dropping the term here would be an undocumented deviation from the
+// confirmed source, not a fix -- so the audit keeps it and documents why.
+
+namespace {
+uint32_t referenceGetTPage(int tp, int abr, int x, int y) {
+  return static_cast<uint32_t>(((tp & 0x3) << 7) | ((abr & 0x3) << 5) |
+                                ((y & 0x100) >> 4) | ((x & 0x3FF) >> 6) |
+                                ((y & 0x200) << 2)) &
+         0xFFFFu;
+}
+} // namespace
+
+// x=0,y=0 / x=512,y=0 / x=768,y=384 are the real Crash Bandicoot texture
+// page origins (see the SetDrawMode regression comment above). Sweep every
+// tp (0-3) and abr (0-3) at each origin against the source-derived formula,
+// not the implementation under test.
+TEST_F(PsyqGpuTest, GetTPageEncodesRealCrashTexturePages) {
+  psyq_register_libgpu_extras();
+  struct Origin {
+    int x, y;
+  };
+  const Origin origins[] = {{0, 0}, {512, 0}, {768, 384}};
+  for (const Origin &o : origins) {
+    for (int tp = 0; tp < 4; ++tp) {
+      for (int abr = 0; abr < 4; ++abr) {
+        ctx.reset();
+        ctx.mem = &mem;
+        ctx.r[A0] = static_cast<uint32_t>(tp);
+        ctx.r[A1] = static_cast<uint32_t>(abr);
+        ctx.r[A2] = static_cast<uint32_t>(o.x);
+        ctx.r[A3] = static_cast<uint32_t>(o.y);
+
+        psyq_dispatch("libgpu_GetTPage", &ctx);
+
+        EXPECT_EQ(ctx.r[V0], referenceGetTPage(tp, abr, o.x, o.y))
+            << "tp=" << tp << " abr=" << abr << " x=" << o.x
+            << " y=" << o.y;
+      }
+    }
+  }
+}
+
+// Isolates the two y-derived bits the table sweep above exercises only in
+// combination: bit 4 of the result (y's bit 8, in-range VRAM Y) and bit 11
+// (y's bit 9, the 2 MB-VRAM term kept per the source, see block comment
+// above).
+TEST_F(PsyqGpuTest, GetTPageEncodesYBit8AndBit11FromSource) {
+  psyq_register_libgpu_extras();
+  struct Case {
+    int y;
+    uint32_t expected;
+  };
+  const Case cases[] = {
+      {0, 0x0000u},
+      {256, 0x0010u}, // y bit 8 -> result bit 4
+      {512, 0x0800u}, // y bit 9 -> result bit 11 (2 MB VRAM term)
+      {768, 0x0810u}, // both bits set together
+  };
+  for (const Case &c : cases) {
+    ctx.reset();
+    ctx.mem = &mem;
+    ctx.r[A0] = 0;
+    ctx.r[A1] = 0;
+    ctx.r[A2] = 0;
+    ctx.r[A3] = static_cast<uint32_t>(c.y);
+
+    psyq_dispatch("libgpu_GetTPage", &ctx);
+
+    EXPECT_EQ(ctx.r[V0], c.expected) << "y=" << c.y;
+  }
+}
+
 // Registry wiring
 
 TEST_F(PsyqGpuTest, RegistryDispatchesAllNewNames) {
