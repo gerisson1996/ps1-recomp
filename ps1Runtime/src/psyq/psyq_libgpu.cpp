@@ -136,12 +136,27 @@ void hle_libgpu_SetDispMask(recomp_context *ctx) {
   writeGP1(0x03000000u | (mask ? 0u : 1u));
 }
 
-// LoadImage(rect*, src*) -- GP0(0xA0) + (w*h+1)/2 data words.
+// LoadImage(rect*, src*) -- GP0(0x01) Clear Cache + GP0(0xA0) + (w*h+1)/2
+// data words.
+//
+// LoadImage(rect,data) forwards to _addque2(dws, rect, sizeof(RECT), data)
+// (psyz decomp/src/libgpu/sys.c:280-284), and _dws -- the queued executor
+// this function's body doubles as (see hle_libgpu__dws below) -- always
+// issues a GP0(0x01) "Clear Cache" word immediately before the CPU->VRAM
+// transfer header (sys.c:767-769: `*GPU_STATUS = STATUS_READY_TO_RECEIVE_CMD;
+// *GPU_DATA = CMD_CLEAR_CACHE; *GPU_DATA = ... CMD_COPY_CPU_TO_VRAM;`, with
+// CMD_CLEAR_CACHE = 0x01000000 at sys.c:148). Audited 2026-07-28: the
+// pre-audit implementation omitted this leading word. gpu.cpp's
+// executeClearCache() is a documented NOP for this software rasterizer, so
+// the omission had no visible symptom, but the GP0 stream did not match what
+// real PsyQ emits on every one of the 1458 CPU->VRAM uploads measured per
+// run (2026-07-27).
 void hle_libgpu_LoadImage(recomp_context *ctx) {
   PsyqRect r = readRect(ctx, ctx->r[A0]);
   uint32_t src = ctx->r[A1];
   if (r.w <= 0 || r.h <= 0) return;
 
+  writeGP0(0x01000000u); // GP0(0x01): Clear Cache
   writeGP0(0xA0000000u);
   writeGP0(static_cast<uint32_t>(r.y & 0xFFFF) << 16 |
            static_cast<uint32_t>(r.x & 0xFFFF));
@@ -287,13 +302,24 @@ void hle_libgpu__addque(recomp_context *ctx) {
 }
 
 // _dws(rect*, data*) -- device write: the queued executor behind LoadImage
-// (CPU RAM -> VRAM). Identical argument layout to LoadImage.
+// (CPU RAM -> VRAM). Identical argument layout and GP0 sequence to LoadImage
+// (psyz decomp/src/libgpu/sys.c:745-783, `int _dws(RECT*, u_long*)`) --
+// confirmed as the same routine LoadImage's addque2 call dispatches to
+// (sys.c:280-284). This is the 1458-calls/run item from the phase-1
+// measurement: _dws is what actually runs each frame; LoadImage itself is
+// never dispatched by name (it only runs here via this direct C++ call).
 void hle_libgpu__dws(recomp_context *ctx) {
   hle_libgpu_LoadImage(ctx);
   ctx->r[V0] = 0;
 }
 
 // _drs(rect*, data*) -- device read: the executor behind StoreImage.
+// NOTE (2026-07-28 audit): sys.c's _drs (sys.c:787-831) issues the same
+// leading GP0(0x01) Clear Cache word _dws does before its VRAM->CPU header.
+// StoreImage/_drs is out of scope for this audit pass (not in the phase-1
+// mandatory list -- its VRAM->CPU drain is separately stubbed, see
+// hle_libgpu_StoreImage's own comment); flagging here so a future
+// StoreImage audit does not have to rediscover it.
 void hle_libgpu__drs(recomp_context *ctx) {
   hle_libgpu_StoreImage(ctx);
   ctx->r[V0] = 0;

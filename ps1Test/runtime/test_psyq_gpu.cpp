@@ -71,9 +71,31 @@ TEST_F(PsyqGpuTest, SetDispMaskDisableSendsGP1_03_With1) {
   EXPECT_EQ(gp1[0], 0x03000001u);
 }
 
-// LoadImage
+// LoadImage / _dws
+//
+// LoadImage(rect,data) forwards to _addque2(dws, rect, sizeof(RECT), data)
+// (psyz decomp/src/libgpu/sys.c:280-284: `return D_800B8920->addque2(
+// (int(*)(u_long,u_long))D_800B8920->dws, (u_long)rect, sizeof(RECT),
+// (u_long)p);`). _dws is the queued executor that actually runs the
+// transfer -- and it is what accounts for the 1458 calls/run measured
+// 2026-07-27 (LoadImage itself is registered but dispatched 0x/run; its
+// body only runs because hle_libgpu__dws calls hle_libgpu_LoadImage
+// directly in C++, psyq_libgpu.cpp).
+//
+// _dws's real GP0 sequence (sys.c:745-783, `int _dws(RECT* rect, u_long*
+// data)`) is:
+//   *GPU_STATUS = STATUS_READY_TO_RECEIVE_CMD;      // sys.c:767
+//   *GPU_DATA   = CMD_CLEAR_CACHE;                  // sys.c:768 (0x01000000, sys.c:148)
+//   *GPU_DATA   = CMD_COPY_CPU_TO_VRAM;              // sys.c:769 (0xA0000000)
+//   *GPU_DATA   = rect.x | rect.y << 16;              // sys.c:770
+//   *GPU_DATA   = rect.w | rect.h << 16;              // sys.c:771
+//   ... (w*h+1)/2 data words ...                      // sys.c:773-781
+// The pre-audit implementation omitted the leading GP0(0x01) Clear Cache
+// word entirely -- gpu.cpp's executeClearCache() is a documented NOP for
+// this software rasterizer, so the omission produced no visible symptom,
+// but the GP0 stream did not match what every real CPU->VRAM upload emits.
 
-TEST_F(PsyqGpuTest, LoadImageEmitsCpuToVramHeaderAndData) {
+TEST_F(PsyqGpuTest, LoadImageEmitsClearCacheThenCpuToVramHeaderAndData) {
   // 4x2 pixels = 8 px = 4 words of pixel data.
   uint32_t rectP = 0x80100000u;
   uint32_t srcP  = 0x80100100u;
@@ -85,12 +107,13 @@ TEST_F(PsyqGpuTest, LoadImageEmitsCpuToVramHeaderAndData) {
   ctx.r[A1] = srcP;
   hle_libgpu_LoadImage(&ctx);
 
-  ASSERT_EQ(gp0.size(), 3u + 4u);
-  EXPECT_EQ(gp0[0], 0xA0000000u);              // CPU->VRAM cmd
-  EXPECT_EQ(gp0[1], (0u << 16) | 320u);        // Y|X
-  EXPECT_EQ(gp0[2], (2u << 16) | 4u);          // H|W
+  ASSERT_EQ(gp0.size(), 4u + 4u);
+  EXPECT_EQ(gp0[0], 0x01000000u);              // GP0(0x01): Clear Cache
+  EXPECT_EQ(gp0[1], 0xA0000000u);              // CPU->VRAM cmd
+  EXPECT_EQ(gp0[2], (0u << 16) | 320u);        // Y|X
+  EXPECT_EQ(gp0[3], (2u << 16) | 4u);          // H|W
   for (int i = 0; i < 4; ++i)
-    EXPECT_EQ(gp0[3 + i], pixels[i]);
+    EXPECT_EQ(gp0[4 + i], pixels[i]);
 }
 
 TEST_F(PsyqGpuTest, LoadImageOddPixelCountRoundsUpDataWords) {
@@ -104,9 +127,10 @@ TEST_F(PsyqGpuTest, LoadImageOddPixelCountRoundsUpDataWords) {
   ctx.r[A0] = rectP;
   ctx.r[A1] = srcP;
   hle_libgpu_LoadImage(&ctx);
-  ASSERT_EQ(gp0.size(), 5u); // 3 hdr + 2 data
-  EXPECT_EQ(gp0[3], 0xCAFEBABEu);
-  EXPECT_EQ(gp0[4], 0xDEADBEEFu);
+  ASSERT_EQ(gp0.size(), 6u); // clear-cache + 3 hdr + 2 data
+  EXPECT_EQ(gp0[0], 0x01000000u);
+  EXPECT_EQ(gp0[4], 0xCAFEBABEu);
+  EXPECT_EQ(gp0[5], 0xDEADBEEFu);
 }
 
 TEST_F(PsyqGpuTest, LoadImageZeroSizeIsNoop) {
@@ -116,6 +140,30 @@ TEST_F(PsyqGpuTest, LoadImageZeroSizeIsNoop) {
   ctx.r[A1] = 0x80100100u;
   hle_libgpu_LoadImage(&ctx);
   EXPECT_TRUE(gp0.empty());
+}
+
+// _dws is the symbol actually dispatched 1458x/run (LoadImage itself is
+// never dispatched by name); exercise it through the registry rather than
+// trusting the delegation in psyq_libgpu.cpp is wired correctly.
+TEST_F(PsyqGpuTest, DwsDispatchesLikeLoadImageAndReturnsZero) {
+  psyq_register_libgpu_extras();
+  uint32_t rectP = 0x80100000u;
+  uint32_t srcP  = 0x80100100u;
+  writeRect(rectP, 64, 8, 2, 1); // 2 px -> 1 data word
+  mem.write32(srcP, 0xABCD1234u);
+
+  ctx.r[A0] = rectP;
+  ctx.r[A1] = srcP;
+  ctx.r[V0] = 0xFFFFFFFFu;
+  psyq_dispatch("libgpu__dws", &ctx);
+
+  ASSERT_EQ(gp0.size(), 4u + 1u);
+  EXPECT_EQ(gp0[0], 0x01000000u);
+  EXPECT_EQ(gp0[1], 0xA0000000u);
+  EXPECT_EQ(gp0[2], (8u << 16) | 64u);
+  EXPECT_EQ(gp0[3], (1u << 16) | 2u);
+  EXPECT_EQ(gp0[4], 0xABCD1234u);
+  EXPECT_EQ(ctx.r[V0], 0u);
 }
 
 // StoreImage
