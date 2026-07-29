@@ -226,6 +226,94 @@ TEST_F(PsyqGpuTest, LibgsStubsAreNoopAndDoNotCrash) {
   EXPECT_TRUE(gp1.empty());
 }
 
+// SetDrawMode
+//
+// SetDrawMode(DR_MODE *p, int dfe, int dtd, int tpage, RECT *tw) must encode
+// its arguments into the two GP0 words of the DR_MODE primitive.  The
+// pre-2026-07 implementation wrote fixed 0xE1000000 / 0xE2000000
+// placeholders, which forced texpage 0 on every textured primitive the game
+// queued -- 456720 GP0(0x7C) sprites per 15s run, measured 2026-07-27.
+// Texpage 0 points at VRAM (0,0), where the framebuffer band lives, instead
+// of the loaded texture pages at (512..1023, 384). Those pages do hold real
+// data (7944 distinct colours), so this is a wrong-address bug, not missing
+// data. Encoding confirmed against the psyz decomp reference (workspace
+// clone at PS1Recomp-workspace/psyz/decomp/src/libgpu/sys.c):
+//   SetDrawMode: sys.c:503-506.
+//   get_mode (retail/production-GPU branch -- info.version 0/3, per the 1MB
+//     VRAM height table at sys.c:108; Crash targets retail hardware, not the
+//     2MB-VRAM devkit branch taken when info.version is 1 or 2): sys.c:624-630.
+//   get_tw: sys.c:662-673.
+// 5th arg (RECT *tw) travels on the stack at sp+16 (o32 ABI), confirmed via
+// the recompiled_out.cpp callers of func_80041054 (SetDrawMode's HLE'd
+// address): MEM_WRITE32(ctx, ctx->r29 + 16, ...).
+
+TEST_F(PsyqGpuTest, SetDrawModeEncodesTexpageAndFlagsIntoGp0Word) {
+  psyq_register_libgpu_extras();
+  const uint32_t p = 0x80100000u;
+  const int dfe = 1, dtd = 0;
+  const int tpage = 0x1A; // texture page base the game would pass
+
+  ctx.r[SP] = 0x801FFF00u;
+  ctx.r[A0] = p;
+  ctx.r[A1] = static_cast<uint32_t>(dfe);
+  ctx.r[A2] = static_cast<uint32_t>(dtd);
+  ctx.r[A3] = static_cast<uint32_t>(tpage);
+  mem.write32(ctx.r[SP] + 16u, 0); // RECT *tw = NULL
+
+  psyq_dispatch("libgpu_SetDrawMode", &ctx);
+
+  const uint32_t mode = mem.read32(p + 4);
+  EXPECT_EQ(mode >> 24, 0xE1u) << "must remain a GP0(E1) command";
+  EXPECT_EQ(mode & 0x1FFu, static_cast<uint32_t>(tpage) & 0x1FFu)
+      << "texpage bits were dropped -- this is the 2026-07 regression";
+  EXPECT_EQ((mode >> 10) & 1u, static_cast<uint32_t>(dfe));
+  EXPECT_EQ((mode >> 9) & 1u, static_cast<uint32_t>(dtd));
+  EXPECT_EQ(mem.read8(p + 3), 2u) << "DR_MODE len must stay 2";
+}
+
+// get_tw(NULL) returns the literal value 0 (sys.c:672 `return 0;`), not a
+// bare GP0(0xE2) command -- a null texture window becomes a GP0(0x00) NOP,
+// which psx-spx notes is often inserted between Texpage and Rectangle
+// commands anyway.
+TEST_F(PsyqGpuTest, SetDrawModeWithNullTextureWindowEmitsZeroWord) {
+  psyq_register_libgpu_extras();
+  const uint32_t p = 0x80100000u;
+  ctx.r[SP] = 0x801FFF00u;
+  ctx.r[A0] = p;
+  ctx.r[A1] = 0;
+  ctx.r[A2] = 0;
+  ctx.r[A3] = 0;
+  mem.write32(ctx.r[SP] + 16u, 0); // RECT *tw = NULL
+
+  psyq_dispatch("libgpu_SetDrawMode", &ctx);
+
+  EXPECT_EQ(mem.read32(p + 8), 0x00000000u);
+}
+
+TEST_F(PsyqGpuTest, SetDrawModeEncodesTextureWindowRectIntoGp0Word) {
+  psyq_register_libgpu_extras();
+  const uint32_t p  = 0x80100000u;
+  const uint32_t tw = 0x80100100u;
+  ctx.r[SP] = 0x801FFF00u;
+  ctx.r[A0] = p;
+  ctx.r[A1] = 0;
+  ctx.r[A2] = 0;
+  ctx.r[A3] = 0;
+  writeRect(tw, /*x=*/8, /*y=*/16, /*w=*/64, /*h=*/32);
+  mem.write32(ctx.r[SP] + 16u, tw);
+
+  psyq_dispatch("libgpu_SetDrawMode", &ctx);
+
+  // maskX = (-w & 0xFF) >> 3 = (-64 & 0xFF) >> 3 = 0x18
+  // maskY = (-h & 0xFF) >> 3 = (-32 & 0xFF) >> 3 = 0x1C
+  // offsX = (x & 0xFF) >> 3  = (8 & 0xFF)  >> 3  = 0x01
+  // offsY = (y & 0xFF) >> 3  = (16 & 0xFF) >> 3  = 0x02
+  // word = E2000000 | offsY<<15 | offsX<<10 | maskY<<5 | maskX
+  const uint32_t expected = 0xE2000000u | (0x02u << 15) | (0x01u << 10) |
+                             (0x1Cu << 5) | 0x18u;
+  EXPECT_EQ(mem.read32(p + 8), expected);
+}
+
 // Registry wiring
 
 TEST_F(PsyqGpuTest, RegistryDispatchesAllNewNames) {

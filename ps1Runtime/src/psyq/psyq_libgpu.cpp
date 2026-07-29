@@ -372,13 +372,62 @@ void psyq_register_libgpu_extras() {
                  ((y & 0x100) >> 4) | ((x & 0x3FF) >> 6) | ((y & 0x200) << 2);
     ctx->r[V0] = r & 0xFFFFu;
   });
+  // SetDrawMode(DR_MODE *p, int dfe, int dtd, int tpage, RECT *tw):
+  // DR_MODE { u_long tag; u_long code[2]; }; code[0] = GP0(E1) draw mode,
+  // code[1] = GP0(E2) texture window. 5th arg (tw) travels on the stack at
+  // sp+16 (o32 ABI) -- confirmed from recompiled_out.cpp's callers of
+  // func_80041054 (SetDrawMode's HLE'd address), which write the RECT*
+  // via MEM_WRITE32(ctx, ctx->r29 + 16, ...) right before the call.
+  //
+  // Encoding confirmed against the psyz decomp reference (workspace clone,
+  // PS1Recomp-workspace/psyz/decomp/src/libgpu/sys.c):
+  //   SetDrawMode: sys.c:503-506 -- setlen(p,2); code[0]=get_mode(...);
+  //     code[1]=get_tw(tw).
+  //   get_mode: sys.c:624-630. Two branches key off info.version (GPU
+  //     hardware type, not PsyQ SDK version): 1/2 select an old
+  //     large-coordinate devkit GPU encoding; every other value selects the
+  //     retail/production encoding used below. info.version is 0 or 3 for
+  //     1 MB VRAM (the D_800B89BC height table at sys.c:108), which is what
+  //     Crash (and every retail PS1) targets, so the retail branch applies:
+  //       (dtd ? 0xE1000200 : 0xE1000000) | (dfe ? 0x400 : 0) |
+  //       (tpage & 0x9FF)
+  //     i.e. bit9 = dither (dtd), bit10 = draw-in-display-area-allowed
+  //     (dfe), and tpage supplies bits 0-8 plus bit 11 unmasked -- matching
+  //     psx-spx's GP0(E1h) layout (bit11 = "texpage Y base 2, 2MB VRAM
+  //     only"). PsyQ does not mask bit 11 out for retail builds; it is
+  //     simply never set by GetTPage for in-range (<512) VRAM Y coordinates
+  //     on 1 MB hardware, so it is always 0 here in practice (matches the
+  //     2026-07-22 project finding that bit 11 does not apply to this
+  //     target).
+  //   get_tw: sys.c:662-673 -- returns the literal value 0 when tw==NULL
+  //     (i.e. GP0(0x00), a NOP -- not a GP0(0xE2) command). For a non-null
+  //     RECT {x,y,w,h}, it packs offsetY<<15 | offsetX<<10 | maskY<<5 |
+  //     maskX (all in 8px steps), matching psx-spx's GP0(E2h) layout.
   psyq_register("libgpu_SetDrawMode", [](recomp_context *ctx) {
-    // DR_MODE { u_long tag; u_long code[2]; } — set len=2, codes are GP0 cmds.
     uint32_t p = ctx->r[A0];
     if (p == 0) return;
-    ctx->mem->write8(p + 3, 2); // length in tag's high byte
-    ctx->mem->write32(p + 4, 0xE1000000u); // GP0(0xE1) draw mode placeholder
-    ctx->mem->write32(p + 8, 0xE2000000u); // GP0(0xE2) tex window placeholder
+    bool dfe      = ctx->r[A1] != 0;
+    bool dtd      = ctx->r[A2] != 0;
+    uint32_t tpage = ctx->r[A3];
+    uint32_t tw    = ctx->mem->read32(ctx->r[SP] + 16); // RECT *tw, o32 stack arg
+
+    writeLen(ctx, p, 2);
+
+    uint32_t mode = (dtd ? 0xE1000200u : 0xE1000000u) |
+                     (dfe ? 0x400u : 0u) | (tpage & 0x9FFu);
+    ctx->mem->write32(p + 4, mode);
+
+    uint32_t twWord = 0;
+    if (tw != 0) {
+      PsyqRect r = readRect(ctx, tw);
+      auto lowByte = [](int32_t v) { return static_cast<uint32_t>(v) & 0xFFu; };
+      uint32_t offsX = lowByte(r.x) >> 3;
+      uint32_t offsY = lowByte(r.y) >> 3;
+      uint32_t maskX = lowByte(-static_cast<int32_t>(r.w)) >> 3;
+      uint32_t maskY = lowByte(-static_cast<int32_t>(r.h)) >> 3;
+      twWord = 0xE2000000u | (offsY << 15) | (offsX << 10) | (maskY << 5) | maskX;
+    }
+    ctx->mem->write32(p + 8, twWord);
   });
 }
 
