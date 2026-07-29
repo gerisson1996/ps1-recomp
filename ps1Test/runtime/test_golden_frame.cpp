@@ -1,7 +1,9 @@
 #include <cstdio>
 #include <cstdlib>
+#include <array>
 #include <fstream>
 #include <gtest/gtest.h>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -14,6 +16,39 @@ constexpr const char *kRepoRoot = "../../";
 
 std::string atRoot(const char *relative) {
   return std::string(kRepoRoot) + relative;
+}
+
+// Counts distinct non-black colours inside the display band (y=12..227), which
+// is where the game's visible framebuffer lives.  Pixel count alone cannot tell
+// content from an empty screen: a plain clear already covers the whole band, so
+// it scores ~221k non-zero pixels while carrying only 4 distinct colours.
+// Colour diversity is what separates "something was drawn" from "the screen was
+// cleared".  Returns -1 when the file is unreadable or malformed.
+long countBandColours(const std::string &path) {
+  std::ifstream in(path, std::ios::binary);
+  if (!in.good())
+    return -1;
+  std::string magic;
+  int w = 0, h = 0, maxval = 0;
+  in >> magic >> w >> h >> maxval;
+  if (magic != "P6" || w <= 0 || h <= 0)
+    return -1;
+  in.get();
+  std::vector<unsigned char> px(static_cast<size_t>(w) * h * 3);
+  in.read(reinterpret_cast<char *>(px.data()),
+          static_cast<std::streamsize>(px.size()));
+  if (in.gcount() != static_cast<std::streamsize>(px.size()))
+    return -1;
+  std::set<std::array<unsigned char, 3>> colours;
+  for (int y = 12; y < 228 && y < h; ++y) {
+    const size_t base = static_cast<size_t>(y) * w * 3;
+    for (int x = 0; x < w; ++x) {
+      const size_t i = base + static_cast<size_t>(x) * 3;
+      if (px[i] || px[i + 1] || px[i + 2])
+        colours.insert({px[i], px[i + 1], px[i + 2]});
+    }
+  }
+  return static_cast<long>(colours.size());
 }
 
 // Counts non-zero 16-bit pixels in a P6 PPM produced by dumpVramPpm.
@@ -84,11 +119,19 @@ TEST(GoldenFrame, CrashRendersContentAtFrame200) {
 
   const long n = countNonZeroPixels(ppm);
   ASSERT_GE(n, 0) << "VRAM capture missing or malformed at " << ppm;
-
-  // Lower bound only.  The exact figure is recorded when Phase 1 lands a
-  // visible title screen; until then this asserts the pipeline produces
-  // pixels at all, which is what regressed silently before.
   EXPECT_GT(n, 0) << "VRAM is entirely black at frame 200";
+
+  // Content check.  A cleared screen scores exactly 4 colours in this band;
+  // the Universal Interactive Studios boot screen scored 173..300 across three
+  // runs on 2026-07-28.  The bound sits well below that spread and well above
+  // a clear, so it fails on a blank screen without being flaky.  The spread
+  // itself is real run-to-run variance and is Phase 2 R4 work, not a reason to
+  // widen this bound further.
+  const long colours = countBandColours(ppm);
+  ASSERT_GE(colours, 0) << "VRAM capture missing or malformed at " << ppm;
+  EXPECT_GT(colours, 50)
+      << "display band has " << colours
+      << " distinct colours -- a cleared screen scores 4, so nothing was drawn";
 
   std::remove(ppm.c_str());
 }
