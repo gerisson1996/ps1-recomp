@@ -84,7 +84,7 @@ TEST_F(PsyqGpuTest, SetDispMaskDisableSendsGP1_03_With1) {
 //
 // _dws's real GP0 sequence (sys.c:745-783, `int _dws(RECT* rect, u_long*
 // data)`) is:
-//   *GPU_STATUS = STATUS_READY_TO_RECEIVE_CMD;      // sys.c:767
+//   *GPU_STATUS = STATUS_READY_TO_RECEIVE_CMD;      // sys.c:767 -- GP1, see below
 //   *GPU_DATA   = CMD_CLEAR_CACHE;                  // sys.c:768 (0x01000000, sys.c:148)
 //   *GPU_DATA   = CMD_COPY_CPU_TO_VRAM;              // sys.c:769 (0xA0000000)
 //   *GPU_DATA   = rect.x | rect.y << 16;              // sys.c:770
@@ -94,6 +94,17 @@ TEST_F(PsyqGpuTest, SetDispMaskDisableSendsGP1_03_With1) {
 // word entirely -- gpu.cpp's executeClearCache() is a documented NOP for
 // this software rasterizer, so the omission produced no visible symptom,
 // but the GP0 stream did not match what every real CPU->VRAM upload emits.
+//
+// Two gaps this audit did NOT close, recorded so they are not rediscovered:
+//   * `*GPU_STATUS` is the GP1 port, not GP0. sys.c:767 is GP1(0x04) with
+//     DMA direction 0, and sys.c:778 sets 0x04000002. Neither GP1 write is
+//     emitted here; the runtime GPU does not model DMA direction for this
+//     path, so nothing observable depends on them yet.
+//   * sys.c:753-758 clamps rect.w/h against info.w/h and writes the clamped
+//     values back into the caller's RECT, and returns -1 when there is
+//     nothing to write. Our LoadImage returns early and hle_libgpu__dws
+//     forces V0=0, so an empty rect reports success and no clamp is written
+//     back. See the note on hle_libgpu_LoadImage in psyq_libgpu.cpp.
 
 TEST_F(PsyqGpuTest, LoadImageEmitsClearCacheThenCpuToVramHeaderAndData) {
   // 4x2 pixels = 8 px = 4 words of pixel data.
@@ -168,17 +179,21 @@ TEST_F(PsyqGpuTest, DwsDispatchesLikeLoadImageAndReturnsZero) {
 
 // _addque2
 //
-// _addque2(exec, p1, len, p2) has no decompiled body in sys.c (it is
-// `INCLUDE_ASM`-only, sys.c:866), but psyz's PC reimplementation of the same
-// driver struct entry -- an admissible source clone -- gives its semantics
-// unambiguously: psyz/psyz/src/psyz/libgpu.c:178-181,
+// _addque2(exec, p1, len, p2) is NOT verified against an admissible source.
+// The decomp body is `INCLUDE_ASM`-only (sys.c:866) with no matching entry
+// under asm/nonmatchings/, so the real queueing behaviour is unconfirmed.
+// psyz's PC *reimplementation* (psyz/psyz/src/psyz/libgpu.c:178-181),
 //   static int psyz_addque2(int (*exec)(u_long,u_long), u_long p1, int len,
 //                            u_long p2) { return exec(p1, p2); }
-// `len` (a2) is unused, and the return value must be whatever `exec`
-// returns via V0 -- not a value _addque2 itself decides. The test build's
-// recomp_dispatch (test_stubs.cpp) is a no-op, which is actually useful
-// here: since it never touches ctx, a V0 sentinel set before the call
-// survives only if hle_libgpu__addque2 does not overwrite it itself.
+// is a port, not the decomp, so it does not satisfy this project's citation
+// rule -- it is only the basis for the shape we implement. Closing this needs
+// the disassembly of _addque2 in the Crash binary. See the fuller note on
+// hle_libgpu__addque2 in psyq_libgpu.cpp.
+//
+// What the tests below can therefore prove is narrow: argument routing
+// (p1->a0, p2 from a3 not a2, RA restored) and that _addque2 does not invent
+// a V0 of its own. The test build's recomp_dispatch (test_stubs.cpp) is a
+// no-op, so no test here can show V0 originating in exec.
 
 TEST_F(PsyqGpuTest, AddQue2ForwardsP1AndP2ToExecArgsAndPreservesReturnValue) {
   psyq_register_libgpu_extras();
@@ -193,12 +208,19 @@ TEST_F(PsyqGpuTest, AddQue2ForwardsP1AndP2ToExecArgsAndPreservesReturnValue) {
 
   EXPECT_EQ(ctx.r[A0], 0x80100000u) << "p1 must land in exec's a0";
   EXPECT_EQ(ctx.r[A1], 0x80200000u) << "p2 (a3, not a2=len) must land in exec's a1";
+  // recomp_dispatch is a no-op in the test build, so this can only prove that
+  // _addque2 does not clobber V0 itself. It cannot prove V0 came from exec --
+  // that would need a dispatch stub that writes V0.
   EXPECT_EQ(ctx.r[V0], 0xDEADBEEFu)
-      << "V0 must come from exec, not be hardcoded by _addque2 itself";
+      << "_addque2 must not overwrite V0 with a value of its own";
   EXPECT_EQ(ctx.r[RA], 0x80099999u) << "RA must be restored after the call";
 }
 
-TEST_F(PsyqGpuTest, AddQue2NullExecReturnsZeroWithoutTouchingArgs) {
+// Pins OUR defensive null guard, not PsyQ semantics: the real _addque2 has no
+// null check (its callers always pass a valid device routine). This test exists
+// so the guard is not removed by accident, and it must not be read as evidence
+// that the hardware behaves this way.
+TEST_F(PsyqGpuTest, AddQue2NullExecTakesOurDefensiveGuardNotPsyqSemantics) {
   psyq_register_libgpu_extras();
   ctx.r[A0] = 0; // exec = NULL
   ctx.r[A1] = 0x80100000u;
@@ -504,7 +526,7 @@ TEST_F(PsyqGpuTest, GetTPageEncodesYBit8AndBit11FromSource) {
 // PutDrawEnv(env) builds a DR_ENV command block via SetDrawEnv2 (psyz decomp
 // src/libgpu/sys.c:362-373, 561-620) and queues it through addque2/cwc; the
 // GP0(0xE1) word it produces comes from the same get_mode() helper
-// SetDrawMode uses (sys.c:509-521, 573; retail/1MB-VRAM branch at
+// SetDrawMode uses (sys.c:503-507 for SetDrawMode itself, get_mode at
 // sys.c:628-631, confirmed applicable to this target in the SetDrawMode
 // audit above):
 //   (dtd ? 0xE1000200 : 0xE1000000) | (dfe ? 0x400 : 0) | (tpage & 0x9FF)

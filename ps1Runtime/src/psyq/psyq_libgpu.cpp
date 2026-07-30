@@ -151,6 +151,17 @@ void hle_libgpu_SetDispMask(recomp_context *ctx) {
 // the omission had no visible symptom, but the GP0 stream did not match what
 // real PsyQ emits on every one of the 1458 CPU->VRAM uploads measured per
 // run (2026-07-27).
+// Two deviations from _dws (sys.c:745-783) that this audit did not close, left
+// as behaviour changes with game-visible risk rather than silent fixes:
+//   * sys.c:753-754 clamps rect.w/h against info.w/h and writes the clamped
+//     values back into the CALLER's RECT. We do not write back, so a game
+//     passing an oversized rect keeps its original values.
+//   * sys.c:756-758 returns -1 when there is nothing to write. We return early
+//     and hle_libgpu__dws forces V0=0, so an empty rect reports success.
+//     LoadImage's return value is what _addque2 hands back to the game.
+// Neither is exercised by Crash's 1458 uploads (all in-range, none empty), so
+// changing them now would be an unmeasured behaviour change on the one path
+// that currently renders. Revisit if a game depends on either.
 void hle_libgpu_LoadImage(recomp_context *ctx) {
   PsyqRect r = readRect(ctx, ctx->r[A0]);
   uint32_t src = ctx->r[A1];
@@ -267,17 +278,25 @@ void hle_libgpu_checkRECT(recomp_context *ctx) { (void)ctx; }
 // _addque2(exec, p1, len, p2) -- PSY-Q internal GPU op queue (libgpu
 // sys.c). LoadImage/StoreImage/ClearImage/MoveImage/DrawOTag/PutDrawEnv all
 // enqueue their device routine here. On real hardware `len` bytes of p1 are
-// queued and `exec(p1, p2)` runs once the GPU is idle. The declaration-only
-// _addque2 in sys.c (`INCLUDE_ASM(...)`, sys.c:866) has no decompiled body,
-// but psyz's PC reimplementation of the same driver struct entry -- an
-// admissible source clone under this project's rules -- gives its semantics
-// unambiguously (psyz/psyz/src/psyz/libgpu.c:178-181):
-//   static int psyz_addque2(int (*exec)(u_long,u_long), u_long p1, int len,
-//                            u_long p2) { return exec(p1, p2); }
-// i.e. `len` (a2) is dead, and V0 must carry whatever `exec` returns, not a
-// value _addque2 itself decides. Audited 2026-07-28: this HLE already
-// matches -- exec runs with (p1, p2) in (a0, a1) and V0 is left untouched
-// afterward, so it naturally carries exec's result through recomp_dispatch.
+// queued and `exec(p1, p2)` runs once the GPU is idle.
+//
+// NOT VERIFIED against an admissible source. The decomp's _addque2 is
+// declaration-only (`INCLUDE_ASM(...)`, sys.c:866) and the clone carries no
+// matching entry under asm/nonmatchings/, so the real queueing behaviour --
+// in particular whether `len` bytes of p1 are copied before exec runs -- is
+// unconfirmed. What we implement matches psyz's PC *reimplementation*
+// (psyz/psyz/src/psyz/libgpu.c:178-181), which collapses the queue to an
+// immediate `return exec(p1, p2)` with `len` dead. That is a port, not the
+// decomp, so it does not satisfy this project's citation rule; it is recorded
+// here as the basis for the current shape, not as verification.
+//
+// Closing this properly needs the disassembly of _addque2 in the Crash binary,
+// which the phase plan does admit as a source. Until then the audit registry
+// must keep this HLE as `nao-auditada`.
+//
+// Our `exec == 0` guard has no source counterpart -- real callers always pass
+// a valid device routine. It is a defensive addition of ours; the test that
+// pins it says so explicitly.
 // The `exec == 0` guard is a defensive addition with no source counterpart
 // (real code has no null check); harmless because every real caller in this
 // codebase (LoadImage/_dws, StoreImage/_drs, ClearImage/_clr, DrawOTag's and
