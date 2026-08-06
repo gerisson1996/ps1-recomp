@@ -3,6 +3,7 @@
 #include "runtime/memory.h"
 #include "runtime/metrics.h"
 #include "runtime/psyq/psyq_state.h"
+#include <algorithm>
 #include <chrono>
 #include <fmt/format.h>
 #include <thread>
@@ -241,6 +242,29 @@ void hle_SetDefDispEnv(recomp_context *ctx) {
 //     GP1(0x07) -- set vertical   display range
 //     GP1(0x08) -- set display mode (width, height, interlace)
 //
+// Audited 2026-08-06 against the psyz decomp reference (workspace clone,
+// PS1Recomp-workspace/psyz/decomp/src/libgpu/sys.c:399-461). PutDispEnv
+// branches on info.version (GPU hardware type); the same retail/1MB-VRAM
+// branch this project's PutDrawEnv audit established applies here
+// (info.version 0/3) is used below:
+//
+//   GP1(0x05) -- sys.c:409-412: (disp.y & 0x3FF) << 10 | (disp.x & 0x3FF).
+//     The pre-audit code masked vx but not vy; an unmasked negative vy can
+//     shift into bits 24-26 and corrupt the 0x05 command nibble itself.
+//   GP1(0x06)/(0x07) -- sys.c:413-427: computed from DISPENV.screen (NOT
+//     .disp), with defaults when screen.w/h == 0 and hard clamps. This
+//     project only targets NTSC (GetVideoMode() default 0 / pad0 == false),
+//     so the PAL branch (0x13/310/312 constants) is not implemented; the
+//     pre-audit code used a fabricated disp.w/h-based formula that matched
+//     neither branch.
+//   GP1(0x08) -- sys.c:404, 428-457: bit layout matches psx-spx's documented
+//     GP1(08h) fields (docs/graphicsprocessingunitgpu.md) exactly, the same
+//     layout gpu.cpp's case 0x08 consumer already assumes. The pre-audit
+//     code put isrgb24 at bit5 and isinter at bit6 (both wrong) and never
+//     set the Hres2/368-mode bit, so producer and consumer disagreed.
+//     info.reverse (SetGraphReverse) is not tracked by this runtime, so
+//     that bit (0x80) is never set -- no game exercises it here.
+//
 void hle_PutDispEnv(recomp_context *ctx) {
   if (!g_cfg.writeGP1) {
     return;
@@ -250,33 +274,51 @@ void hle_PutDispEnv(recomp_context *ctx) {
   int16_t vy   = static_cast<int16_t>(ctx->mem->read16(envPtr + 2));
   int16_t vw   = static_cast<int16_t>(ctx->mem->read16(envPtr + 4));
   int16_t vh   = static_cast<int16_t>(ctx->mem->read16(envPtr + 6));
+  int16_t sx   = static_cast<int16_t>(ctx->mem->read16(envPtr + 8));
+  int16_t sy   = static_cast<int16_t>(ctx->mem->read16(envPtr + 10));
+  int16_t sw   = static_cast<int16_t>(ctx->mem->read16(envPtr + 12));
+  int16_t sh   = static_cast<int16_t>(ctx->mem->read16(envPtr + 14));
   uint8_t isinter = ctx->mem->read8(envPtr + 16);
   uint8_t isrgb24 = ctx->mem->read8(envPtr + 17);
 
   // GP1(0x05): display start address
-  g_cfg.writeGP1(0x05000000u | (static_cast<uint32_t>(vy) << 10) |
-                                 static_cast<uint32_t>(vx & 0x3FF));
+  g_cfg.writeGP1(0x05000000u | ((static_cast<uint32_t>(vy) & 0x3FFu) << 10) |
+                                 (static_cast<uint32_t>(vx) & 0x3FFu));
 
-  // GP1(0x06): horizontal display range [X1, X2]
-  // NTSC: X1=0x260, X2=0x260+vw*8 (for 8-pix/line units)
-  uint32_t x1 = 0x260u;
-  uint32_t x2 = x1 + static_cast<uint32_t>(vw) * 8u;
-  g_cfg.writeGP1(0x06000000u | (x2 << 12) | x1);
-
-  // GP1(0x07): vertical display range [Y1, Y2]
-  // NTSC: Y1=0x88, Y2=0x88+vh
-  uint32_t y1 = 0x88u;
-  uint32_t y2 = y1 + static_cast<uint32_t>(vh);
-  g_cfg.writeGP1(0x07000000u | (y2 << 10) | y1);
+  // GP1(0x06)/(0x07): horizontal/vertical display range from DISPENV.screen
+  // (NTSC constants: v_start offset 0x10, v clamp bounds 256/258).
+  int32_t hStart = static_cast<int32_t>(sx) * 10 + 0x260;
+  int32_t hEnd   = hStart + (sw != 0 ? static_cast<int32_t>(sw) * 10 : 2560);
+  int32_t vStart = static_cast<int32_t>(sy) + 0x10;
+  int32_t vEnd   = vStart + (sh != 0 ? static_cast<int32_t>(sh) : 240);
+  hStart = std::clamp(hStart, 500, 3290);
+  hEnd   = std::clamp(hEnd, hStart + 0x50, 3290);
+  vStart = std::clamp(vStart, 0x10, 256);
+  vEnd   = std::clamp(vEnd, vStart + 2, 258);
+  g_cfg.writeGP1(0x06000000u | ((static_cast<uint32_t>(hEnd) & 0xFFFu) << 12) |
+                                 (static_cast<uint32_t>(hStart) & 0xFFFu));
+  g_cfg.writeGP1(0x07000000u | ((static_cast<uint32_t>(vEnd) & 0x3FFu) << 10) |
+                                 (static_cast<uint32_t>(vStart) & 0x3FFu));
 
   // GP1(0x08): display mode
-  // Bits: [2:0]=hres (0=256,1=320,2=512,3=640), [3]=vres (0=240,1=480)
-  //       [4]=video (0=NTSC), [5]=isrgb24, [6]=isinter
-  uint32_t hmode = (vw >= 640) ? 3u : (vw >= 512) ? 2u : (vw >= 320) ? 1u : 0u;
-  uint32_t vmode = (vh >= 480) ? 1u : 0u;
-  uint32_t dispMode = hmode | (vmode << 3) | (static_cast<uint32_t>(isrgb24) << 5) |
-                      (static_cast<uint32_t>(isinter) << 6);
-  g_cfg.writeGP1(0x08000000u | dispMode);
+  uint32_t mode = 0;
+  if (isrgb24) mode |= 0x10u;
+  if (isinter) mode |= 0x20u;
+  if (vw <= 280) {
+    // Hres1 = 0 (256)
+  } else if (vw <= 352) {
+    mode |= 0x01u; // Hres1 = 1 (320)
+  } else if (vw <= 400) {
+    mode |= 0x40u; // Hres2 = 1 (368)
+  } else if (vw <= 560) {
+    mode |= 0x02u; // Hres1 = 2 (512)
+  } else {
+    mode |= 0x03u; // Hres1 = 3 (640)
+  }
+  if (vh > 256) {
+    mode |= 0x24u; // Vres (bit2) + interlace (bit5) combo for >256-line modes
+  }
+  g_cfg.writeGP1(0x08000000u | mode);
 }
 
 // SetDefDrawEnv

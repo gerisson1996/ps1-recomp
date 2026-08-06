@@ -298,6 +298,14 @@ TEST_F(PsyqHleTest, SetDefDispEnvWritesFields) {
 }
 
 // PutDispEnv
+//
+// Audited 2026-08-06 against the psyz decomp reference (workspace clone,
+// PS1Recomp-workspace/psyz/decomp/src/libgpu/sys.c:399-461, retail/1MB-VRAM
+// branch -- info.version 0/3, the same branch this project's PutDrawEnv audit
+// established as applicable to this target). Cross-checked against psx-spx
+// (docs/graphicsprocessingunitgpu.md: GP1(05h) at line 694-701, GP1(08h) at
+// line 377+) and against gpu.cpp's own GP1 consumer (case 0x05/0x08 in
+// gpu.cpp, whose comment already states the correct GP1(08h) bit layout).
 
 TEST_F(PsyqHleTest, PutDispEnvEmitsFourGP1Commands) {
     const uint32_t env = 0x4000;
@@ -318,6 +326,120 @@ TEST_F(PsyqHleTest, PutDispEnvEmitsFourGP1Commands) {
     EXPECT_EQ(gp1Words[1] >> 24, 0x06u);
     EXPECT_EQ(gp1Words[2] >> 24, 0x07u);
     EXPECT_EQ(gp1Words[3] >> 24, 0x08u);
+}
+
+// GP1(0x05): sys.c:409-412 (retail branch) masks BOTH disp.x and disp.y with
+// 0x3FF before packing -- (disp.y & 0x3FF) << 10 | (disp.x & 0x3FF). The
+// pre-audit implementation masked vx but not vy. That is latent for the
+// small in-range values real callers pass, but for a large/negative disp.y
+// the unmasked shift can bleed into the 0x05 command nibble itself (bits
+// 24-26), corrupting the command. Pin the masking directly rather than
+// relying on gpu.cpp's consumer-side re-mask to hide the producer bug.
+TEST_F(PsyqHleTest, PutDispEnvMasksBothXAndYIntoDisplayStart) {
+    const uint32_t env = 0x4100;
+    mem.write16(env + 0, static_cast<uint16_t>(300));   // vx
+    mem.write16(env + 2, static_cast<uint16_t>(-500));  // vy (out of 0-511 range)
+    mem.write16(env + 4, 320);
+    mem.write16(env + 6, 240);
+    mem.write8(env + 16, 0);
+    mem.write8(env + 17, 0);
+
+    ctx.r[A0] = env;
+    hle_PutDispEnv(&ctx);
+
+    ASSERT_GE(gp1Words.size(), 1u);
+    uint32_t gp1_05 = gp1Words[0];
+    // Command nibble must stay 0x05 -- an unmasked negative vy shifted into
+    // bits 10+ can otherwise corrupt bits 24-26 and change the command.
+    EXPECT_EQ(gp1_05 >> 24, 0x05u);
+    uint32_t x = gp1_05 & 0x3FFu;
+    uint32_t y = (gp1_05 >> 10) & 0x3FFu;
+    EXPECT_EQ(x, 300u);
+    EXPECT_EQ(y, static_cast<uint16_t>(-500) & 0x3FFu);
+}
+
+// GP1(0x06)/(0x07): sys.c:413-427 (retail/NTSC branch, pad0=GetVideoMode()==0)
+// compute the horizontal/vertical display range from DISPENV.screen (NOT
+// .disp), with defaults (screen.w==0 -> 2560, screen.h==0 -> 240) and hard
+// clamps. The pre-audit implementation fabricated a formula from disp.w/h
+// instead (x1=0x260, x2=x1+disp.w*8; y1=0x88, y2=y1+disp.h) that does not
+// match sys.c at all.
+TEST_F(PsyqHleTest, PutDispEnvHorizontalVerticalRangeFromScreenDefaults) {
+    const uint32_t env = 0x4200;
+    mem.write16(env + 0,  0);
+    mem.write16(env + 2,  0);
+    mem.write16(env + 4,  320);
+    mem.write16(env + 6,  240);
+    mem.write16(env + 8,  0);   // screen.x
+    mem.write16(env + 10, 0);   // screen.y
+    mem.write16(env + 12, 0);   // screen.w = 0 -> default 2560 (sys.c:417)
+    mem.write16(env + 14, 0);   // screen.h = 0 -> default 240  (sys.c:418)
+    mem.write8(env + 16, 0);
+    mem.write8(env + 17, 0);
+
+    ctx.r[A0] = env;
+    hle_PutDispEnv(&ctx);
+
+    ASSERT_EQ(gp1Words.size(), 4u);
+    uint32_t gp1_06 = gp1Words[1];
+    uint32_t hStart = gp1_06 & 0xFFFu;
+    uint32_t hEnd   = (gp1_06 >> 12) & 0xFFFu;
+    // h_start = 0*10 + 0x260 = 608; h_end = 608 + 2560 = 3168 (both within clamp)
+    EXPECT_EQ(hStart, 608u);
+    EXPECT_EQ(hEnd, 3168u);
+
+    uint32_t gp1_07 = gp1Words[2];
+    uint32_t vStart = gp1_07 & 0x3FFu;
+    uint32_t vEnd   = (gp1_07 >> 10) & 0x3FFu;
+    // v_start = 0 + 0x10 = 16; v_end = 16 + 240 = 256 (both within clamp)
+    EXPECT_EQ(vStart, 16u);
+    EXPECT_EQ(vEnd, 256u);
+}
+
+// GP1(0x08): sys.c:404, 428-457 build the mode word from isrgb24 (bit4),
+// isinter (bit5), disp.w thresholds (bits 0-1 + bit6 "Hres2"), and disp.h
+// (bit2+bit5 combo for >256-line modes). Matches psx-spx's documented
+// GP1(08h) bit layout, i.e. the SAME layout gpu.cpp's case 0x08 comment
+// already assumes. The pre-audit implementation put isrgb24 at bit5 and
+// isinter at bit6 (both wrong slots) and never set the video-mode/Hres2
+// bits, so the two implementations actively disagreed with each other.
+TEST_F(PsyqHleTest, PutDispEnvDisplayModeBitsMatchGp1_08Layout) {
+    auto modeFor = [&](int16_t w, int16_t h, uint8_t isrgb24, uint8_t isinter) {
+        const uint32_t env = 0x4300;
+        mem.write16(env + 0, 0);
+        mem.write16(env + 2, 0);
+        mem.write16(env + 4, static_cast<uint16_t>(w));
+        mem.write16(env + 6, static_cast<uint16_t>(h));
+        mem.write16(env + 8, 0);
+        mem.write16(env + 10, 0);
+        mem.write16(env + 12, 0);
+        mem.write16(env + 14, 0);
+        mem.write8(env + 16, isinter);
+        mem.write8(env + 17, isrgb24);
+        gp1Words.clear();
+        ctx.r[A0] = env;
+        hle_PutDispEnv(&ctx);
+        return gp1Words.back();
+    };
+
+    // 256-wide, 240-tall, 15bpp, non-interlaced -> mode == 0 (no bits set)
+    EXPECT_EQ(modeFor(256, 240, 0, 0) & 0xFFu, 0x00u);
+    // 320-wide -> Hres1 bit0
+    EXPECT_EQ(modeFor(320, 240, 0, 0) & 0xFFu, 0x01u);
+    // 368-wide -> Hres2 bit6, Hres1 stays 0
+    EXPECT_EQ(modeFor(368, 240, 0, 0) & 0xFFu, 0x40u);
+    // 512-wide -> Hres1 bit1
+    EXPECT_EQ(modeFor(512, 240, 0, 0) & 0xFFu, 0x02u);
+    // 640-wide -> Hres1 bits0+1
+    EXPECT_EQ(modeFor(640, 240, 0, 0) & 0xFFu, 0x03u);
+    // isrgb24 -> bit4
+    EXPECT_EQ(modeFor(256, 240, 1, 0) & 0xFFu, 0x10u);
+    // isinter -> bit5
+    EXPECT_EQ(modeFor(256, 240, 0, 1) & 0xFFu, 0x20u);
+    // 480-tall -> bit2 + bit5 combo (0x24), needs interlace hardware-wise
+    EXPECT_EQ(modeFor(256, 480, 0, 0) & 0xFFu, 0x24u);
+    // Command nibble is always 0x08
+    EXPECT_EQ(modeFor(320, 240, 0, 0) >> 24, 0x08u);
 }
 
 // SetDefDrawEnv
