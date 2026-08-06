@@ -361,6 +361,17 @@ void hle_PutDispEnv(recomp_context *ctx) {
 //     +23 dfe      (uint8)  draw-to-display enable
 //     ... (DR_TPAGE follows)
 //
+// Audited 2026-08-06 against the psyz decomp reference (workspace clone,
+// PS1Recomp-workspace/psyz/decomp/src/libgpu/ext.c:46-69):
+//   env->tpage = getTPage(0, 0, 640, 0)       -- always this fixed value,
+//     independent of the x/y/w/h args, evaluating (via this project's own
+//     already-audited GetTPage formula, psyq_libgpu.cpp) to
+//     (640 & 0x3FF) >> 6 = 0x0A.
+//   env->dfe = video_mode ? h <= 288 : h <= 256 -- this project has no PAL
+//     path (GetVideoMode() defaults to and stays NTSC/0), so the h <= 256
+//     branch is used unconditionally.
+// The pre-audit implementation hardcoded tpage=0 and dfe=0, ignoring both
+// GetTPage and the height threshold.
 void hle_SetDefDrawEnv(recomp_context *ctx) {
   uint32_t envPtr = ctx->r[A0];
   int16_t  x  = static_cast<int16_t>(ctx->r[A1]);
@@ -381,10 +392,11 @@ void hle_SetDefDrawEnv(recomp_context *ctx) {
   ctx->mem->write16(envPtr + 14, 0);
   ctx->mem->write16(envPtr + 16, 0);
   ctx->mem->write16(envPtr + 18, 0);
-  // tpage = 0 (default), dtd=1 (dithering), dfe=0
-  ctx->mem->write16(envPtr + 20, 0);
+  // tpage = getTPage(0, 0, 640, 0) = 0x0A (ext.c:67), dtd=1 (dithering)
+  ctx->mem->write16(envPtr + 20, 0x000Au);
   ctx->mem->write8(envPtr + 22, 1); // dtd
-  ctx->mem->write8(envPtr + 23, 0); // dfe
+  // dfe = h <= 256 (NTSC branch, ext.c:60-64)
+  ctx->mem->write8(envPtr + 23, h <= 256 ? 1 : 0);
 
   ctx->r[V0] = envPtr;
 }

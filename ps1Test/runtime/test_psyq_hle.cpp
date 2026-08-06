@@ -476,6 +476,53 @@ TEST_F(PsyqHleTest, PutDispEnvDisplayModeBitsMatchGp1_08Layout) {
 }
 
 // SetDefDrawEnv
+//
+// Audited 2026-08-06 against the psyz decomp reference (workspace clone,
+// PS1Recomp-workspace/psyz/decomp/src/libgpu/ext.c:46-69,
+// `DRAWENV* SetDefDrawEnv(DRAWENV* env, int x, int y, int w, int h)`):
+//   env->tpage = getTPage(0, 0, 640, 0)      -- NOT 0
+//   env->dfe   = video_mode ? h<=288 : h<=256 -- NOT always 0
+// This project has no PAL path (GetVideoMode() defaults to, and stays, 0 /
+// NTSC -- see hle_libgpu_GetVideoMode), so the NTSC branch (h<=256) applies.
+// getTPage(0,0,640,0), using this project's own already-audited GetTPage
+// formula (psyq_libgpu.cpp, cited in the SetDrawMode audit), evaluates to
+// (640 & 0x3FF) >> 6 = 0x0A -- the pre-audit implementation hardcoded 0.
+
+TEST_F(PsyqHleTest, SetDefDrawEnvWritesTexturePageFromGetTPage640Origin) {
+    const uint32_t env = 0x5100;
+    ctx.r[A0] = env;
+    ctx.r[A1] = 0;
+    ctx.r[A2] = 0;
+    ctx.r[A3] = 320;
+    mem.write32(ctx.r[SP] + 16, 240);
+
+    hle_SetDefDrawEnv(&ctx);
+
+    // ext.c:67 -- env->tpage = getTPage(0, 0, 640, 0) = 0x0A, independent of
+    // the x/y/w/h arguments passed to SetDefDrawEnv itself.
+    EXPECT_EQ(mem.read16(env + 20), 0x0Au);
+}
+
+TEST_F(PsyqHleTest, SetDefDrawEnvSetsDfeFromHeightNtscThreshold) {
+    // ext.c:60-64 -- NTSC branch: dfe = (h <= 256).
+    const uint32_t envShort = 0x5200;
+    ctx.r[A0] = envShort;
+    ctx.r[A1] = 0;
+    ctx.r[A2] = 0;
+    ctx.r[A3] = 320;
+    mem.write32(ctx.r[SP] + 16, 240); // h = 240 <= 256 -> dfe = 1
+    hle_SetDefDrawEnv(&ctx);
+    EXPECT_EQ(mem.read8(envShort + 23), 1u);
+
+    const uint32_t envTall = 0x5300;
+    ctx.r[A0] = envTall;
+    ctx.r[A1] = 0;
+    ctx.r[A2] = 0;
+    ctx.r[A3] = 320;
+    mem.write32(ctx.r[SP] + 16, 480); // h = 480 > 256 -> dfe = 0
+    hle_SetDefDrawEnv(&ctx);
+    EXPECT_EQ(mem.read8(envTall + 23), 0u);
+}
 
 TEST_F(PsyqHleTest, SetDefDrawEnvWritesClipAndOffset) {
     const uint32_t env = 0x5000;
@@ -494,7 +541,10 @@ TEST_F(PsyqHleTest, SetDefDrawEnvWritesClipAndOffset) {
     EXPECT_EQ(mem.read16(env + 8), 0u);    // ofs.x = clip.x
     EXPECT_EQ(mem.read16(env + 10), 0u);   // ofs.y = clip.y
     EXPECT_EQ(mem.read8(env + 22), 1u);    // dtd = 1 (dithering on by default)
-    EXPECT_EQ(mem.read8(env + 23), 0u);    // dfe = 0
+    // dfe = h<=256 on the NTSC branch (ext.c:60-64); h=240 here -> dfe=1.
+    // (Corrected 2026-08-06: this assertion previously pinned the pre-audit
+    // implementation's hardcoded dfe=0, which did not match the source.)
+    EXPECT_EQ(mem.read8(env + 23), 1u);
     EXPECT_EQ(ctx.r[V0], env);
 }
 
