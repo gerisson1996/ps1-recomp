@@ -154,6 +154,28 @@ void hle_ClearOTagR(recomp_context *ctx) {
 //   Followed by word_count GP0 data words.
 //   Terminal node: next_ptr == 0x00FFFFFF.
 //
+// Audited 2026-08-06: DrawOTag(p) itself (psyz decomp/src/libgpu/sys.c:354-360)
+// just forwards to `addque2(cwc, p, 0, 0)`, and _cwc (sys.c:850-855) programs
+// DMA2 in "linked-list" mode (CHCR=0x01000401) with MADR=p -- on real
+// hardware the GPU's DMA controller itself walks the OT and streams the
+// words to GP0, the CPU does not decode headers at all. This function is
+// this project's software model of that DMA-controller traversal, so the
+// node format it must match is the DMA2 linked-list format, not sys.c
+// (which never decodes it in software). That format is documented directly
+// in psx-spx (docs/dmachannels.md:173-190, "Linked List DMA"):
+//   bits 0-23  = address of next node (or all-1s end marker, 0xFFFFFF)
+//   bits 24-31 = number of extra (data) words in this node
+// and in docs/graphicsprocessingunitgpu.md:1084-1136 ("Depth Ordering
+// Table"), whose worked example confirms only the N data words after the
+// header are sent to GP0 -- the header word itself is link-chain metadata,
+// never pushed as a GP0 command. Below already matches this exactly: header
+// decode (wordCount = bits 31:24, next = bits 23:0), per-node GP0 pushes
+// limited to the N words following the header, KSEG0-bit restore on the
+// 24-bit physical next-pointer, and termination on next == 0xFFFFFF. No
+// change was needed; see DrawOTagEmptyListEmitsNothing /
+// DrawOTagSubmitsSinglePrimitive / DrawOTagTraversesChain /
+// DrawOTagHeaderWordItselfIsNeverPushedToGp0 in test_psyq_hle.cpp.
+//
 void hle_DrawOTag(recomp_context *ctx) {
   if (!g_cfg.writeGP0) {
     ctx->r[V0] = 0;

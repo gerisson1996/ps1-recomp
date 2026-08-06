@@ -227,6 +227,17 @@ TEST_F(PsyqHleTest, ClearOTagRNZeroIsNop) {
 }
 
 // DrawOTag
+//
+// Audited 2026-08-06 against psx-spx's DMA2 linked-list documentation
+// (docs/dmachannels.md:173-190) and OT worked example
+// (docs/graphicsprocessingunitgpu.md:1084-1136), cross-referenced with the
+// psyz decomp (sys.c:354-360, 850-855) confirming DrawOTag(p) is
+// _cwc(p) -- a DMA2 linked-list kick, so the CPU-side traversal below is
+// this project's software model of what the GPU's own DMA controller does
+// on real hardware. Verdict: already correct, no source-shape divergence
+// found. The four tests below pin: empty-list no-op, single-node word push,
+// multi-node traversal order, and (new) that the header word itself is
+// link-chain metadata and must never be pushed to GP0.
 
 TEST_F(PsyqHleTest, DrawOTagEmptyListEmitsNothing) {
     // Write a single terminal node at 0x1000
@@ -273,6 +284,28 @@ TEST_F(PsyqHleTest, DrawOTagTraversesChain) {
     ASSERT_EQ(gp0Words.size(), 2u);
     EXPECT_EQ(gp0Words[0], 0xBBBBBBBBu); // from A
     EXPECT_EQ(gp0Words[1], 0xAAAAAAAAu); // from B
+}
+
+// dmachannels.md:173-190 and the OT worked example in
+// graphicsprocessingunitgpu.md:1084-1136 agree: only the N words AFTER the
+// header are DMA'd to GP0. The header word (word_count | next_ptr) is
+// link-chain metadata consumed by the DMA controller, never a GP0 command.
+TEST_F(PsyqHleTest, DrawOTagHeaderWordItselfIsNeverPushedToGp0) {
+    const uint32_t base = 0x1000;
+    // Header word deliberately holds a recognisable "poison" pattern so the
+    // test fails loudly if it ever leaks into gp0Words.
+    mem.write32(base + 0, (1u << 24) | 0x00FFFFFFu);
+    mem.write32(base + 4, 0xC0FFEEEEu); // the single real data word
+
+    ctx.r[A0] = base;
+    hle_DrawOTag(&ctx);
+
+    ASSERT_EQ(gp0Words.size(), 1u);
+    EXPECT_EQ(gp0Words[0], 0xC0FFEEEEu);
+    for (uint32_t w : gp0Words) {
+        EXPECT_NE(w, (1u << 24) | 0x00FFFFFFu)
+            << "header word must never be pushed to GP0";
+    }
 }
 
 // SetDefDispEnv
