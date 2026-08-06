@@ -69,6 +69,19 @@ void warnOnceFor(const char *name) {
 
 // GetClut(x, y) -> packed CLUT id. y occupies the high 9 bits, x the low 6
 // (x is always a multiple of 16, hence the >>4).
+//
+// Audited 2026-08-06: the psyz decomp's GetClut (decomp/src/libgpu/prim.c:9,
+// `u_short GetClut(int x, int y) { return getClut(x, y); }`) only forwards
+// to an SDK-internal `getClut` macro whose body is not present in the
+// decomp tree (proprietary SDK header, not admissible). The packed layout
+// is independently documented as hardware fact -- not an SDK internal -- by
+// psx-spx (docs/graphicsprocessingunitgpu.md:366-374, "Clut Attribute"),
+// which for the v0 (1 MB VRAM) GPU this project targets gives:
+//   bits 0-5   X coordinate X/16 (16-halfword steps)
+//   bits 6-14  Y coordinate 0-511 (9 bits)
+//   bit 15     unused
+// Verdict: already correct -- (y & 0x1FF) << 6 | (x >> 4) & 0x3F matches
+// exactly. No change made.
 void hle_libgpu_GetClut(recomp_context *ctx) {
   uint32_t x = ctx->r[A0];
   uint32_t y = ctx->r[A1];

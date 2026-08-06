@@ -338,6 +338,44 @@ TEST_F(PsyqGpuTest, LibgsStubsAreNoopAndDoNotCrash) {
   EXPECT_TRUE(gp1.empty());
 }
 
+// GetClut
+//
+// Audited 2026-08-06 against psx-spx (docs/graphicsprocessingunitgpu.md:
+// 366-374, "Clut Attribute"), which documents the packed layout as hardware
+// fact for the v0 (1 MB VRAM) GPU this project targets:
+//   bits 0-5   X coordinate X/16 (16-halfword steps)
+//   bits 6-14  Y coordinate 0-511 (9 bits)
+//   bit 15     unused
+// The psyz decomp's GetClut (decomp/src/libgpu/prim.c:9) only forwards to an
+// SDK-internal `getClut` macro not present in the decomp tree, so psx-spx is
+// the citable source here, not sys.c/prim.c directly. Verdict: already
+// correct on first read -- no implementation change made, this test exists
+// purely to pin the encoding.
+
+TEST_F(PsyqGpuTest, GetClutPacksXShr4AndYIntoPsxSpxLayout) {
+  // x=512 (multiple of 16, x>>4=32), y=300 -> (300&0x1FF)<<6 | 32
+  ctx.r[A0] = 512;
+  ctx.r[A1] = 300;
+  hle_libgpu_GetClut(&ctx);
+  EXPECT_EQ(ctx.r[V0], (300u << 6) | 32u);
+}
+
+TEST_F(PsyqGpuTest, GetClutXIsDividedBy16NotPassedThrough) {
+  // x must be a CLUT-cell index (x/16), never the raw VRAM X coordinate.
+  ctx.r[A0] = 128; // 128/16 = 8
+  ctx.r[A1] = 0;
+  hle_libgpu_GetClut(&ctx);
+  EXPECT_EQ(ctx.r[V0], 8u);
+}
+
+TEST_F(PsyqGpuTest, GetClutYOccupiesBits6Through14) {
+  ctx.r[A0] = 0;
+  ctx.r[A1] = 511; // max in-range Y for the v0 (1 MB VRAM) GPU
+  hle_libgpu_GetClut(&ctx);
+  EXPECT_EQ(ctx.r[V0], 511u << 6);
+  EXPECT_EQ(ctx.r[V0] & 0x3Fu, 0u) << "low 6 bits must stay reserved for X";
+}
+
 // SetDrawMode
 //
 // SetDrawMode(DR_MODE *p, int dfe, int dtd, int tpage, RECT *tw) must encode
