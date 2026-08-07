@@ -707,3 +707,39 @@ TEST_F(PsyqHleTest, PutDrawEnvBottomRightEncoding) {
     EXPECT_EQ(bx, 255u);
     EXPECT_EQ(by, 239u);
 }
+
+// GP0(0xE3)/(0xE4): sys.c's get_cs (634-641) and get_ce (643-651), retail
+// branch, both do `x = CLAMP(x, 0, info.w - 1); y = CLAMP(y, 0, info.h - 1);`
+// before packing `(y & 0x3FF) << 10 | (x & 0x3FF)`, where info.w/info.h are
+// 1024/512 for info.version 0/3 (sys.c:107-108, 170-171 -- the retail/
+// 1MB-VRAM branch this project's SetDrawMode/PutDrawEnv audits already use).
+// The pre-fix implementation neither clamped nor masked y correctly (0x1FF
+// instead of 0x3FF), so an out-of-range clip rect leaked raw, unclamped bits
+// into the GP0 words instead of being pinned to the VRAM edge like real
+// hardware. clip.x/y here are negative and clip.w/h push the bottom-right
+// corner past both VRAM edges, so every one of those bugs is reachable in a
+// single call.
+TEST_F(PsyqHleTest, PutDrawEnvClampsClipAreaToVramBounds) {
+    const uint32_t env = 0x7100;
+    mem.write16(env + 0,  static_cast<uint16_t>(-10));  // clip.x (< 0)
+    mem.write16(env + 2,  static_cast<uint16_t>(-5));   // clip.y (< 0)
+    mem.write16(env + 4,  2000); // clip.w -- pushes x2 = -10+2000-1 = 1989 > 1023
+    mem.write16(env + 6,  2000); // clip.h -- pushes y2 = -5+2000-1  = 1994 > 511
+    mem.write16(env + 8,  0);
+    mem.write16(env + 10, 0);
+    mem.write16(env + 20, 0);
+    mem.write8(env + 22,  0);
+
+    ctx.r[A0] = env;
+    hle_PutDrawEnv(&ctx);
+
+    ASSERT_GE(gp0Words.size(), 3u);
+    uint32_t e3 = gp0Words[1];
+    uint32_t e4 = gp0Words[2];
+    // get_cs(-10, -5) clamps both to 0 -> top-left pinned to VRAM origin.
+    EXPECT_EQ(e3 & 0x3FFu, 0u);
+    EXPECT_EQ((e3 >> 10) & 0x3FFu, 0u);
+    // get_ce(1989, 1994) clamps to (info.w-1, info.h-1) = (1023, 511).
+    EXPECT_EQ(e4 & 0x3FFu, 1023u);
+    EXPECT_EQ((e4 >> 10) & 0x3FFu, 511u);
+}

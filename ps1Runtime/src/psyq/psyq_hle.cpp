@@ -241,6 +241,22 @@ static_assert(sizeof(DispEnv) == 20, "PsyQ DispEnv is 20 bytes");
 inline int32_t sourceClamp(int32_t x, int32_t lo, int32_t hi) {
   return x < lo ? lo : (x > hi ? hi : x);
 }
+
+// VRAM dimensions used by get_cs/get_ce's CLAMP (sys.c:634-651, "info.w"/
+// "info.h"). ResetGraph (sys.c:159-175) sets these from two lookup tables
+// indexed by info.version (sys.c:107-108):
+//   D_800B89A8[] = {1024, 1024, 1024, 1024, 1024};  // info.w
+//   D_800B89BC[] = {512,  1024, 1024, 512,  1024};  // info.h
+// For info.version 0 or 3 (the retail/1MB-VRAM branch this project's
+// SetDrawMode/PutDrawEnv audits already established as the applicable one),
+// both indices give {1024, 512} -- the same numbers this runtime already
+// carries as ps1::gpu::GPU::VRAM_WIDTH/VRAM_HEIGHT (gpu/gpu.h:106-107).
+// Restated here as local literals rather than #include-ing gpu.h: this
+// module talks to the GPU exclusively through the writeGP0/writeGP1
+// callbacks in HleConfig, never through a direct type dependency, and two
+// constants don't warrant breaking that.
+constexpr int32_t kInfoW = 1024;
+constexpr int32_t kInfoH = 512;
 } // namespace
 
 void hle_SetDefDispEnv(recomp_context *ctx) {
@@ -465,12 +481,30 @@ void hle_SetDefDrawEnv(recomp_context *ctx) {
 // env->tpage leak into those flags, and env->dfe (DRAWENV +0x17, offset 23;
 // psyz/include/libgpu.h:565-575) was never read at all.
 //
-// Known gap (not fixed in this pass): SetDrawEnv2 always also emits
-// GP0(0xE2) Texture Window and GP0(0xE6) Mask Bit Setting (sys.c:574-575,
-// 601), which this implementation still does not. Fixing that would change
-// this function's GP0 word count, which would break test_psyq_hle.cpp's
-// exact-size assertions -- a file outside this task's edit scope. Left
-// documented for a follow-up that can touch that file.
+// Amended 2026-08-07 (Task 4b, gap 1/3) against the same reference:
+// get_cs/get_ce (sys.c:634-651, retail branch) additionally CLAMP the
+// coordinates to the VRAM extent before packing, and mask y with 0x3FF (10
+// bits), not 0x1FF (9 bits):
+//   x = CLAMP(x, 0, info.w - 1); y = CLAMP(y, 0, info.h - 1);
+//   return 0xE3000000 | ((y & 0x3FF) << 10) | (x & 0x3FF);   // get_cs -> E3
+//   return 0xE4000000 | ((y & 0x3FF) << 10) | (x & 0x3FF);   // get_ce -> E4
+// info.w/info.h are 1024/512 on the retail/1MB-VRAM branch (sys.c:107-108,
+// 170-171 -- see kInfoW/kInfoH above). The pre-amendment implementation did
+// neither: an out-of-range clip rect leaked unclamped, wrongly-masked bits
+// straight into the GP0 words. Note the mask half of this fix (0x3FF vs
+// 0x1FF) has no separately observable effect once the clamp is also applied
+// -- a clamped y can never exceed info.h-1 = 511 = 0x1FF, so both masks
+// agree on every value the clamp can produce; it is fixed anyway because it
+// is a real, source-confirmed divergence in its own right, and because an
+// unclamped call path (there is none today, but nothing enforces that)
+// would make the two masks disagree.
+//
+// Known gaps (not fixed in this pass, tracked for Task 4b gaps 2/3):
+//   1) SetDrawEnv2 (sys.c:561-575) emits words in the order E3, E4, E5, E1,
+//      E2, E6 -- this implementation still emits E1 first.
+//   2) SetDrawEnv2 always also emits GP0(0xE2) Texture Window and GP0(0xE6)
+//      Mask Bit Setting (sys.c:574-575, 601), which this implementation
+//      still does not.
 void hle_PutDrawEnv(recomp_context *ctx) {
   if (!g_cfg.writeGP0) {
     return;
@@ -491,15 +525,22 @@ void hle_PutDrawEnv(recomp_context *ctx) {
                 (dfe ? 0x400u : 0u) | (tpage & 0x9FFu);
   g_cfg.writeGP0(e1);
 
-  // GP0(0xE3): drawing area top-left
-  g_cfg.writeGP0(0xE3000000u | (static_cast<uint32_t>(cy & 0x1FF) << 10) |
-                                 static_cast<uint32_t>(cx & 0x3FF));
+  // GP0(0xE3): drawing area top-left. sys.c:634-641 (get_cs, retail branch):
+  //   x = CLAMP(x, 0, info.w - 1); y = CLAMP(y, 0, info.h - 1);
+  //   return 0xE3000000 | ((y & 0x3FF) << 10) | (x & 0x3FF);
+  int32_t csX = sourceClamp(cx, 0, kInfoW - 1);
+  int32_t csY = sourceClamp(cy, 0, kInfoH - 1);
+  g_cfg.writeGP0(0xE3000000u | ((static_cast<uint32_t>(csY) & 0x3FFu) << 10) |
+                                 (static_cast<uint32_t>(csX) & 0x3FFu));
 
-  // GP0(0xE4): drawing area bottom-right (inclusive)
+  // GP0(0xE4): drawing area bottom-right (inclusive). sys.c:643-651
+  // (get_ce, retail branch) -- same CLAMP/mask shape as get_cs above.
   int16_t x2 = static_cast<int16_t>(cx + cw - 1);
   int16_t y2 = static_cast<int16_t>(cy + ch - 1);
-  g_cfg.writeGP0(0xE4000000u | (static_cast<uint32_t>(y2 & 0x1FF) << 10) |
-                                 static_cast<uint32_t>(x2 & 0x3FF));
+  int32_t ceX = sourceClamp(x2, 0, kInfoW - 1);
+  int32_t ceY = sourceClamp(y2, 0, kInfoH - 1);
+  g_cfg.writeGP0(0xE4000000u | ((static_cast<uint32_t>(ceY) & 0x3FFu) << 10) |
+                                 (static_cast<uint32_t>(ceX) & 0x3FFu));
 
   // GP0(0xE5): drawing offset
   g_cfg.writeGP0(0xE5000000u |
