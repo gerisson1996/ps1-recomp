@@ -460,12 +460,14 @@ void hle_SetDefDrawEnv(recomp_context *ctx) {
 // PutDrawEnv
 //
 // PsyQ PutDrawEnv(env):
-//   Applies a DrawEnv to the GPU by sending GP0 commands:
-//     GP0(0xE1) -- texture page (tpage)
-//     GP0(0xE2) -- texture window
+//   Applies a DrawEnv to the GPU by sending GP0 commands, in this order
+//   (SetDrawEnv2, sys.c:561-575 -- see the gap 2/3 amendment below):
 //     GP0(0xE3) -- drawing area top-left
 //     GP0(0xE4) -- drawing area bottom-right
 //     GP0(0xE5) -- drawing offset
+//     GP0(0xE1) -- texture page (tpage)
+//     GP0(0xE2) -- texture window
+//     GP0(0xE6) -- mask bit setting
 //
 // Audited 2026-07-28 against the psyz decomp reference (workspace clone,
 // PS1Recomp-workspace/psyz/decomp/src/libgpu/sys.c): PutDrawEnv builds its
