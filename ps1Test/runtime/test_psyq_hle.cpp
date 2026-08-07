@@ -676,12 +676,44 @@ TEST_F(PsyqHleTest, PutDrawEnvEmitsGP0Commands) {
     ctx.r[A0] = env;
     hle_PutDrawEnv(&ctx);
 
-    // Expect GP0(0xE1), GP0(0xE3), GP0(0xE4), GP0(0xE5)
+    // Expect GP0(0xE3), GP0(0xE4), GP0(0xE5), GP0(0xE1), in SetDrawEnv2's
+    // order (sys.c:561-575); see PutDrawEnvEmitsWordsInSetDrawEnv2Order below
+    // for the order-fix rationale.
     ASSERT_EQ(gp0Words.size(), 4u);
-    EXPECT_EQ(gp0Words[0] >> 24, 0xE1u); // tpage
-    EXPECT_EQ(gp0Words[1] >> 24, 0xE3u); // draw area top-left
-    EXPECT_EQ(gp0Words[2] >> 24, 0xE4u); // draw area bottom-right
-    EXPECT_EQ(gp0Words[3] >> 24, 0xE5u); // draw offset
+    EXPECT_EQ(gp0Words[0] >> 24, 0xE3u); // draw area top-left
+    EXPECT_EQ(gp0Words[1] >> 24, 0xE4u); // draw area bottom-right
+    EXPECT_EQ(gp0Words[2] >> 24, 0xE5u); // draw offset
+    EXPECT_EQ(gp0Words[3] >> 24, 0xE1u); // tpage
+}
+
+// SetDrawEnv2 (sys.c:561-575) pushes GP0 words in this exact order:
+//   get_cs -> E3, get_ce -> E4, get_ofs -> E5, get_mode -> E1, get_tw -> E2,
+//   literal 0xE6000000 -> E6.
+// On real hardware this order matters: the GPU applies each attribute as its
+// word arrives, so E1 (draw mode) landing after E3/E4 (clip area) means the
+// draw mode takes effect only once the clip area is already set, not before.
+// The pre-fix implementation emitted E1 first (E1, E3, E4, E5). This test
+// pins the source order for the four words this implementation currently
+// emits; gap 3 (GP0(0xE2)/(0xE6)) is tracked separately.
+TEST_F(PsyqHleTest, PutDrawEnvEmitsWordsInSetDrawEnv2Order) {
+    const uint32_t env = 0x7300;
+    mem.write16(env + 0,  0);
+    mem.write16(env + 2,  0);
+    mem.write16(env + 4,  320);
+    mem.write16(env + 6,  240);
+    mem.write16(env + 8,  0);
+    mem.write16(env + 10, 0);
+    mem.write16(env + 20, 0);
+    mem.write8(env + 22,  0);
+
+    ctx.r[A0] = env;
+    hle_PutDrawEnv(&ctx);
+
+    ASSERT_EQ(gp0Words.size(), 4u);
+    EXPECT_EQ(gp0Words[0] >> 24, 0xE3u) << "get_cs must be pushed first";
+    EXPECT_EQ(gp0Words[1] >> 24, 0xE4u) << "get_ce second";
+    EXPECT_EQ(gp0Words[2] >> 24, 0xE5u) << "get_ofs third";
+    EXPECT_EQ(gp0Words[3] >> 24, 0xE1u) << "get_mode last, per sys.c:561-575";
 }
 
 TEST_F(PsyqHleTest, PutDrawEnvBottomRightEncoding) {
@@ -699,9 +731,10 @@ TEST_F(PsyqHleTest, PutDrawEnvBottomRightEncoding) {
     ctx.r[A0] = env;
     hle_PutDrawEnv(&ctx);
 
-    // GP0(0xE4): bottom-right = (w-1, h-1) = (255, 239)
+    // GP0(0xE4): bottom-right = (w-1, h-1) = (255, 239). Index 1: emission
+    // order is E3, E4, E5, E1 (sys.c:561-575).
     // bits: [19:10]=y, [9:0]=x
-    uint32_t e4 = gp0Words[2];
+    uint32_t e4 = gp0Words[1];
     uint32_t bx = e4 & 0x3FF;
     uint32_t by = (e4 >> 10) & 0x1FF;
     EXPECT_EQ(bx, 255u);
@@ -733,9 +766,10 @@ TEST_F(PsyqHleTest, PutDrawEnvClampsClipAreaToVramBounds) {
     ctx.r[A0] = env;
     hle_PutDrawEnv(&ctx);
 
-    ASSERT_GE(gp0Words.size(), 3u);
-    uint32_t e3 = gp0Words[1];
-    uint32_t e4 = gp0Words[2];
+    ASSERT_GE(gp0Words.size(), 2u);
+    // Emission order is E3, E4, E5, E1 (sys.c:561-575).
+    uint32_t e3 = gp0Words[0];
+    uint32_t e4 = gp0Words[1];
     // get_cs(-10, -5) clamps both to 0 -> top-left pinned to VRAM origin.
     EXPECT_EQ(e3 & 0x3FFu, 0u);
     EXPECT_EQ((e3 >> 10) & 0x3FFu, 0u);

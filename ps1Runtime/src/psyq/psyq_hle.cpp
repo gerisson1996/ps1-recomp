@@ -499,12 +499,18 @@ void hle_SetDefDrawEnv(recomp_context *ctx) {
 // unclamped call path (there is none today, but nothing enforces that)
 // would make the two masks disagree.
 //
-// Known gaps (not fixed in this pass, tracked for Task 4b gaps 2/3):
-//   1) SetDrawEnv2 (sys.c:561-575) emits words in the order E3, E4, E5, E1,
-//      E2, E6 -- this implementation still emits E1 first.
-//   2) SetDrawEnv2 always also emits GP0(0xE2) Texture Window and GP0(0xE6)
-//      Mask Bit Setting (sys.c:574-575, 601), which this implementation
-//      still does not.
+// Amended 2026-08-07 (Task 4b, gap 2/3): SetDrawEnv2 (sys.c:561-575) pushes
+// its GP0 words in this order: get_cs -> E3, get_ce -> E4, get_ofs -> E5,
+// get_mode -> E1, get_tw -> E2, literal 0xE6000000 -> E6. The pre-amendment
+// implementation emitted E1 first (E1, E3, E4, E5); it now emits E3, E4, E5,
+// E1, matching the source for the four words this function currently
+// builds. On real hardware order matters here: each GP0 word takes effect
+// as it arrives, so the draw mode (E1) is applied only once the clip area
+// (E3/E4) is already set, not before.
+//
+// Known gap (not fixed in this pass, tracked for Task 4b gap 3): SetDrawEnv2
+// always also emits GP0(0xE2) Texture Window and GP0(0xE6) Mask Bit Setting
+// (sys.c:574-575, 601), which this implementation still does not.
 void hle_PutDrawEnv(recomp_context *ctx) {
   if (!g_cfg.writeGP0) {
     return;
@@ -520,10 +526,12 @@ void hle_PutDrawEnv(recomp_context *ctx) {
   uint8_t dtd = ctx->mem->read8(envPtr + 22);
   uint8_t dfe = ctx->mem->read8(envPtr + 23);
 
-  // GP0(0xE1): texture page + dithering + draw-to-display-area enable
-  uint32_t e1 = (dtd ? 0xE1000200u : 0xE1000000u) |
-                (dfe ? 0x400u : 0u) | (tpage & 0x9FFu);
-  g_cfg.writeGP0(e1);
+  // Emission order matches SetDrawEnv2 (sys.c:561-575): get_cs -> E3,
+  // get_ce -> E4, get_ofs -> E5, get_mode -> E1 (get_tw -> E2 and the
+  // literal E6 word are gap 3, tracked separately below). On real hardware
+  // each GP0 word takes effect as it arrives, so this order means the draw
+  // mode (E1) is applied only after the clip area (E3/E4) already is, not
+  // before -- the pre-fix implementation emitted E1 first.
 
   // GP0(0xE3): drawing area top-left. sys.c:634-641 (get_cs, retail branch):
   //   x = CLAMP(x, 0, info.w - 1); y = CLAMP(y, 0, info.h - 1);
@@ -546,6 +554,11 @@ void hle_PutDrawEnv(recomp_context *ctx) {
   g_cfg.writeGP0(0xE5000000u |
                  (static_cast<uint32_t>(static_cast<int32_t>(oy) & 0x7FF) << 11) |
                  static_cast<uint32_t>(static_cast<int32_t>(ox) & 0x7FF));
+
+  // GP0(0xE1): texture page + dithering + draw-to-display-area enable
+  uint32_t e1 = (dtd ? 0xE1000200u : 0xE1000000u) |
+                (dfe ? 0x400u : 0u) | (tpage & 0x9FFu);
+  g_cfg.writeGP0(e1);
 }
 
 } // namespace ps1::psyq

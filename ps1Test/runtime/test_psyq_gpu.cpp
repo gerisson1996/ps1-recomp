@@ -14,6 +14,7 @@
 #include "runtime/psyq/psyq_registry.h"
 #include "runtime/psyq/psyq_state.h"
 
+#include <algorithm>
 #include <cstdint>
 #include <gtest/gtest.h>
 #include <vector>
@@ -608,11 +609,15 @@ TEST_F(PsyqGpuTest, PutDrawEnvMasksTpageAndDropsStrayDtdDfeBitsFromRawValue) {
   ctx.r[A0] = env;
   hle_PutDrawEnv(&ctx);
 
-  ASSERT_FALSE(gp0.empty());
-  EXPECT_EQ(gp0[0] >> 24, 0xE1u);
+  // Task 4b (gap 2) reordered PutDrawEnv's GP0 words to match SetDrawEnv2
+  // (sys.c:561-575: E3, E4, E5, E1, ...), so E1 is no longer gp0[0] -- find
+  // it by opcode instead of hardcoding a position that gap 2/3 now move.
+  auto e1 = std::find_if(gp0.begin(), gp0.end(),
+                          [](uint32_t w) { return (w >> 24) == 0xE1u; });
+  ASSERT_NE(e1, gp0.end());
   // get_mode(dfe=0, dtd=0, tpage=0x7FF) = 0xE1000000 | (0x7FF & 0x9FF)
   //                                     = 0xE10001FF
-  EXPECT_EQ(gp0[0], 0xE10001FFu)
+  EXPECT_EQ(*e1, 0xE10001FFu)
       << "tpage bits 9-10 (dtd/dfe-reserved) must not leak through unmasked";
 }
 
@@ -628,9 +633,13 @@ TEST_F(PsyqGpuTest, PutDrawEnvEncodesDfeBitFromEnv) {
   ctx.r[A0] = env;
   hle_PutDrawEnv(&ctx);
 
-  ASSERT_FALSE(gp0.empty());
+  // See PutDrawEnvMasksTpageAndDropsStrayDtdDfeBitsFromRawValue above: find
+  // E1 by opcode, its position moved with the Task 4b gap 2 reorder.
+  auto e1 = std::find_if(gp0.begin(), gp0.end(),
+                          [](uint32_t w) { return (w >> 24) == 0xE1u; });
+  ASSERT_NE(e1, gp0.end());
   // get_mode(dfe=1, dtd=0, tpage=0) = 0xE1000000 | 0x400 = 0xE1000400
-  EXPECT_EQ(gp0[0], 0xE1000400u)
+  EXPECT_EQ(*e1, 0xE1000400u)
       << "env->dfe (offset 23) must reach GP0(E1) bit 10, per get_mode";
 }
 
