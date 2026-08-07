@@ -508,9 +508,11 @@ void hle_SetDefDrawEnv(recomp_context *ctx) {
 // as it arrives, so the draw mode (E1) is applied only once the clip area
 // (E3/E4) is already set, not before.
 //
-// Known gap (not fixed in this pass, tracked for Task 4b gap 3): SetDrawEnv2
-// always also emits GP0(0xE2) Texture Window and GP0(0xE6) Mask Bit Setting
-// (sys.c:574-575, 601), which this implementation still does not.
+// Amended 2026-08-07 (Task 4b, gap 3/3): SetDrawEnv2 always also emits
+// GP0(0xE2) Texture Window (get_tw(&env->tw), sys.c:574, 662-673) and the
+// literal GP0(0xE6) Mask Bit Setting (sys.c:575), which this implementation
+// now does too, at the tail of the SetDrawEnv2 order established by gap 2.
+// The pre-amendment implementation emitted neither.
 void hle_PutDrawEnv(recomp_context *ctx) {
   if (!g_cfg.writeGP0) {
     return;
@@ -559,6 +561,37 @@ void hle_PutDrawEnv(recomp_context *ctx) {
   uint32_t e1 = (dtd ? 0xE1000200u : 0xE1000000u) |
                 (dfe ? 0x400u : 0u) | (tpage & 0x9FFu);
   g_cfg.writeGP0(e1);
+
+  // GP0(0xE2): texture window. sys.c:662-673 (get_tw), called as
+  // get_tw(&env->tw) -- always the non-NULL branch here, since env->tw is a
+  // struct field, not a pointer:
+  //   code[0] = (rect->x & 0xFF) >> 3;     code[2] = (-rect->w & 0xFF) >> 3;
+  //   code[1] = (rect->y & 0xFF) >> 3;     code[3] = (-rect->h & 0xFF) >> 3;
+  //   return 0xE2000000 | (code[1]<<15) | (code[0]<<10) | (code[3]<<5) |
+  //          code[2];
+  // env->tw is the RECT at DRAWENV offset +12 (x,y,w,h, each int16 -- the
+  // same offset SetDefDrawEnv above already writes as all-zero "no
+  // restriction"). Cross-checked against psx-spx's documented GP0(E2h) bit
+  // layout (workspace clone PS1Recomp-workspace/psx-spx.github.io/docs/
+  // graphicsprocessingunitgpu.md:406-414): bits 0-4 Mask X, 5-9 Mask Y,
+  // 10-14 Offset X, 15-19 Offset Y -- matching code[2]@0-4, code[3]@5-9,
+  // code[0]@10-14, code[1]@15-19 above.
+  int32_t twX = static_cast<int16_t>(ctx->mem->read16(envPtr + 12));
+  int32_t twY = static_cast<int16_t>(ctx->mem->read16(envPtr + 14));
+  int32_t twW = static_cast<int16_t>(ctx->mem->read16(envPtr + 16));
+  int32_t twH = static_cast<int16_t>(ctx->mem->read16(envPtr + 18));
+  uint32_t twCode0 = (static_cast<uint32_t>(twX) & 0xFFu) >> 3;
+  uint32_t twCode1 = (static_cast<uint32_t>(twY) & 0xFFu) >> 3;
+  uint32_t twCode2 = (static_cast<uint32_t>(-twW) & 0xFFu) >> 3;
+  uint32_t twCode3 = (static_cast<uint32_t>(-twH) & 0xFFu) >> 3;
+  g_cfg.writeGP0(0xE2000000u | (twCode1 << 15) | (twCode0 << 10) |
+                 (twCode3 << 5) | twCode2);
+
+  // GP0(0xE6): mask bit setting. sys.c:575 -- SetDrawEnv2 always pushes this
+  // literal, with no dependency on any DRAWENV field (env->isbg's RECT push,
+  // sys.c:576-619, is a separate, conditional tail this function does not
+  // model -- out of scope for Task 4b's three gaps).
+  g_cfg.writeGP0(0xE6000000u);
 }
 
 } // namespace ps1::psyq

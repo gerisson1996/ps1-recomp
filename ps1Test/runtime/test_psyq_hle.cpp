@@ -676,14 +676,17 @@ TEST_F(PsyqHleTest, PutDrawEnvEmitsGP0Commands) {
     ctx.r[A0] = env;
     hle_PutDrawEnv(&ctx);
 
-    // Expect GP0(0xE3), GP0(0xE4), GP0(0xE5), GP0(0xE1), in SetDrawEnv2's
-    // order (sys.c:561-575); see PutDrawEnvEmitsWordsInSetDrawEnv2Order below
-    // for the order-fix rationale.
-    ASSERT_EQ(gp0Words.size(), 4u);
+    // Expect GP0(0xE3), GP0(0xE4), GP0(0xE5), GP0(0xE1), GP0(0xE2), GP0(0xE6),
+    // in SetDrawEnv2's order (sys.c:561-575); see
+    // PutDrawEnvEmitsWordsInSetDrawEnv2Order below for the order rationale,
+    // and PutDrawEnvTextureWindowEncoding for the GP0(0xE2) bit layout.
+    ASSERT_EQ(gp0Words.size(), 6u);
     EXPECT_EQ(gp0Words[0] >> 24, 0xE3u); // draw area top-left
     EXPECT_EQ(gp0Words[1] >> 24, 0xE4u); // draw area bottom-right
     EXPECT_EQ(gp0Words[2] >> 24, 0xE5u); // draw offset
     EXPECT_EQ(gp0Words[3] >> 24, 0xE1u); // tpage
+    EXPECT_EQ(gp0Words[4] >> 24, 0xE2u); // texture window
+    EXPECT_EQ(gp0Words[5] >> 24, 0xE6u); // mask bit setting
 }
 
 // SetDrawEnv2 (sys.c:561-575) pushes GP0 words in this exact order:
@@ -692,9 +695,8 @@ TEST_F(PsyqHleTest, PutDrawEnvEmitsGP0Commands) {
 // On real hardware this order matters: the GPU applies each attribute as its
 // word arrives, so E1 (draw mode) landing after E3/E4 (clip area) means the
 // draw mode takes effect only once the clip area is already set, not before.
-// The pre-fix implementation emitted E1 first (E1, E3, E4, E5). This test
-// pins the source order for the four words this implementation currently
-// emits; gap 3 (GP0(0xE2)/(0xE6)) is tracked separately.
+// The pre-fix implementation emitted E1 first (E1, E3, E4, E5) and never
+// emitted E2/E6 at all.
 TEST_F(PsyqHleTest, PutDrawEnvEmitsWordsInSetDrawEnv2Order) {
     const uint32_t env = 0x7300;
     mem.write16(env + 0,  0);
@@ -709,11 +711,72 @@ TEST_F(PsyqHleTest, PutDrawEnvEmitsWordsInSetDrawEnv2Order) {
     ctx.r[A0] = env;
     hle_PutDrawEnv(&ctx);
 
-    ASSERT_EQ(gp0Words.size(), 4u);
-    EXPECT_EQ(gp0Words[0] >> 24, 0xE3u) << "get_cs must be pushed first";
+    ASSERT_EQ(gp0Words.size(), 6u);
+    EXPECT_EQ(gp0Words[0] >> 24, 0xE3u) << "get_cs first";
     EXPECT_EQ(gp0Words[1] >> 24, 0xE4u) << "get_ce second";
     EXPECT_EQ(gp0Words[2] >> 24, 0xE5u) << "get_ofs third";
-    EXPECT_EQ(gp0Words[3] >> 24, 0xE1u) << "get_mode last, per sys.c:561-575";
+    EXPECT_EQ(gp0Words[3] >> 24, 0xE1u) << "get_mode fourth";
+    EXPECT_EQ(gp0Words[4] >> 24, 0xE2u) << "get_tw fifth";
+    EXPECT_EQ(gp0Words[5] >> 24, 0xE6u) << "literal 0xE6000000 last, per sys.c:561-575";
+}
+
+// GP0(0xE2): sys.c's get_tw (662-673), called as get_tw(&env->tw) -- always
+// the non-NULL branch here, since env->tw is a struct field, not a pointer:
+//   code[0] = (rect->x & 0xFF) >> 3;       code[2] = (-rect->w & 0xFF) >> 3;
+//   code[1] = (rect->y & 0xFF) >> 3;       code[3] = (-rect->h & 0xFF) >> 3;
+//   return 0xE2000000 | (code[1]<<15) | (code[0]<<10) | (code[3]<<5) | code[2];
+// env->tw is the RECT at DRAWENV offset +12 (x,y,w,h, each int16 -- the same
+// offset this file's SetDefDrawEnv tests already exercise). Cross-checked
+// against psx-spx's documented GP0(E2h) bit layout (workspace clone
+// PS1Recomp-workspace/psx-spx.github.io/docs/graphicsprocessingunitgpu.md:
+// 406-414): bits 0-4 Mask X, 5-9 Mask Y, 10-14 Offset X, 15-19 Offset Y --
+// matching code[2]@0-4, code[3]@5-9, code[0]@10-14, code[1]@15-19 above. The
+// pre-fix implementation never emitted this word at all.
+TEST_F(PsyqHleTest, PutDrawEnvTextureWindowEncoding) {
+    const uint32_t env = 0x7400;
+    mem.write16(env + 0,  0);
+    mem.write16(env + 2,  0);
+    mem.write16(env + 4,  320);
+    mem.write16(env + 6,  240);
+    mem.write16(env + 8,  0);
+    mem.write16(env + 10, 0);
+    mem.write16(env + 12, 8);   // tw.x
+    mem.write16(env + 14, 16);  // tw.y
+    mem.write16(env + 16, 32);  // tw.w
+    mem.write16(env + 18, 64);  // tw.h
+    mem.write16(env + 20, 0);
+    mem.write8(env + 22,  0);
+
+    ctx.r[A0] = env;
+    hle_PutDrawEnv(&ctx);
+
+    ASSERT_EQ(gp0Words.size(), 6u);
+    // code[0]=(8&0xFF)>>3=1, code[1]=(16&0xFF)>>3=2,
+    // code[2]=(-32&0xFF)>>3=28, code[3]=(-64&0xFF)>>3=24
+    // -> 0xE2000000 | (2<<15) | (1<<10) | (24<<5) | 28 = 0xE201071C
+    EXPECT_EQ(gp0Words[4], 0xE201071Cu);
+}
+
+// GP0(0xE6): SetDrawEnv2 (sys.c:575) always pushes the literal 0xE6000000 --
+// no computation, no dependency on any DRAWENV field. Confirmed against
+// psx-spx's documented GP0(E6h) layout (graphicsprocessingunitgpu.md:463-468):
+// bits 0-1 are Set-mask-while-drawing / Check-mask-before-draw, both 0 here.
+TEST_F(PsyqHleTest, PutDrawEnvMaskBitSettingIsAlwaysLiteralE6) {
+    const uint32_t env = 0x7500;
+    mem.write16(env + 0,  0);
+    mem.write16(env + 2,  0);
+    mem.write16(env + 4,  320);
+    mem.write16(env + 6,  240);
+    mem.write16(env + 8,  0);
+    mem.write16(env + 10, 0);
+    mem.write16(env + 20, 0);
+    mem.write8(env + 22,  0);
+
+    ctx.r[A0] = env;
+    hle_PutDrawEnv(&ctx);
+
+    ASSERT_EQ(gp0Words.size(), 6u);
+    EXPECT_EQ(gp0Words[5], 0xE6000000u);
 }
 
 TEST_F(PsyqHleTest, PutDrawEnvBottomRightEncoding) {
