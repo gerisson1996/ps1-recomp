@@ -271,6 +271,8 @@ void hle_libgpu_GetVideoMode(recomp_context *ctx) {
   ctx->r[V0] = static_cast<uint32_t>(g_videoMode);
 }
 
+int getVideoMode() { return g_videoMode; }
+
 // Group 1.A -- libgs scene-graph stubs
 //
 // libgs is a higher-level wrapper around libgpu; neither Rayman nor Crash

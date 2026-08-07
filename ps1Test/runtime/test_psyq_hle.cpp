@@ -6,6 +6,7 @@
 #include "runtime/cpu_context.h"
 #include "runtime/emuptr.h"
 #include "runtime/memory.h"
+#include "runtime/psyq/psyq_libgpu.h"
 #include "runtime/psyq/psyq_state.h"
 #include <gtest/gtest.h>
 #include <vector>
@@ -332,13 +333,17 @@ TEST_F(PsyqHleTest, SetDefDispEnvWritesFields) {
 
 // PutDispEnv
 //
-// Audited 2026-08-06 against the psyz decomp reference (workspace clone,
+// Audited 2026-08-06, amended 2026-08-06 after review, against the psyz
+// decomp reference (workspace clone,
 // PS1Recomp-workspace/psyz/decomp/src/libgpu/sys.c:399-461, retail/1MB-VRAM
 // branch -- info.version 0/3, the same branch this project's PutDrawEnv audit
 // established as applicable to this target). Cross-checked against psx-spx
 // (docs/graphicsprocessingunitgpu.md: GP1(05h) at line 694-701, GP1(08h) at
-// line 377+) and against gpu.cpp's own GP1 consumer (case 0x05/0x08 in
-// gpu.cpp, whose comment already states the correct GP1(08h) bit layout).
+// line 770-779, GPUSTAT mapping at 897-905 -- corrected after review; an
+// earlier revision of this comment cited "line 377+", which is
+// GP0(E1h) Draw Mode, a different register) and against gpu.cpp's own GP1
+// consumer (case 0x05/0x08 in gpu.cpp, whose comment already states the
+// correct GP1(08h) bit layout).
 
 TEST_F(PsyqHleTest, PutDispEnvEmitsFourGP1Commands) {
     const uint32_t env = 0x4000;
@@ -475,6 +480,89 @@ TEST_F(PsyqHleTest, PutDispEnvDisplayModeBitsMatchGp1_08Layout) {
     EXPECT_EQ(modeFor(320, 240, 0, 0) >> 24, 0x08u);
 }
 
+// Review finding (Important 1): sys.c's own `CLAMP(h_end, h_start + 0x50,
+// 3290)` call (sys.c:417) can be reached with its min argument exceeding its
+// max whenever the unclamped h_start is already close to the 3290 ceiling --
+// reachable from screen.x >= 269, an in-range int16 value read straight out
+// of game RAM (envPtr+8). CLAMP's ternary (common.h:25) is well-defined
+// there (the `x < min` branch wins regardless of min-vs-max), but the
+// pre-fix std::clamp() had a `!(hi < lo)` precondition and was UB on this
+// input. This test exercises exactly that input and pins the well-defined,
+// source-faithful (sourceClamp) result rather than crashing.
+TEST_F(PsyqHleTest, PutDispEnvHandlesScreenXNearCeilingWithoutUndefinedBehavior) {
+    const uint32_t env = 0x4400;
+    mem.write16(env + 0, 0);
+    mem.write16(env + 2, 0);
+    mem.write16(env + 4, 320);
+    mem.write16(env + 6, 240);
+    mem.write16(env + 8,  269); // screen.x -- unclamped h_start = 269*10+0x260 = 3298 > 3290
+    mem.write16(env + 10, 0);   // screen.y
+    mem.write16(env + 12, 1);   // screen.w = 1 -> unclamped h_end = 3298+10 = 3308
+    mem.write16(env + 14, 0);   // screen.h = 0 -> default
+    mem.write8(env + 16, 0);
+    mem.write8(env + 17, 0);
+
+    ctx.r[A0] = env;
+    hle_PutDispEnv(&ctx); // must not abort/UB
+
+    ASSERT_EQ(gp1Words.size(), 4u);
+    uint32_t gp1_06 = gp1Words[1];
+    uint32_t hStart = gp1_06 & 0xFFFu;
+    uint32_t hEnd   = (gp1_06 >> 12) & 0xFFFu;
+    // h_start: 3298 > 3290 -> clamped to 3290.
+    EXPECT_EQ(hStart, 3290u);
+    // h_end: unclamped 3308 < (clamped h_start + 0x50) = 3370, so CLAMP's
+    // `x < min` branch returns min = 3370 -- which is itself > the 3290 max,
+    // matching sys.c's own CLAMP macro exactly (bug-compatible by design).
+    EXPECT_EQ(hEnd, 3370u);
+}
+
+// Review finding (Important 3): sys.c branches on GetVideoMode() (env->pad0)
+// for the v_start offset (0x10/0x13), the v-range clamp ceiling (256,258 /
+// 310,312), the video-mode bit (GP1(08h) bit3), and the Vres/interlace
+// height threshold (256/288). A pre-amendment revision of this HLE assumed
+// NTSC unconditionally; PAL is reachable via libetc_SetVideoMode
+// (hle_libgpu_SetVideoMode, psyq_libgpu.cpp), already round-tripped by
+// PsyqGpuTest.SetGetVideoModeRoundTrip (test_psyq_gpu.cpp).
+TEST_F(PsyqHleTest, PutDispEnvHonoursPalVideoModeForRangeAndModeBit) {
+    ctx.r[A0] = 1; // PAL
+    hle_libgpu_SetVideoMode(&ctx);
+
+    const uint32_t env = 0x4500;
+    mem.write16(env + 0, 0);
+    mem.write16(env + 2, 0);
+    mem.write16(env + 4, 320);
+    mem.write16(env + 6, 280); // disp.h: > 256 (NTSC threshold) but <= 288 (PAL threshold)
+    mem.write16(env + 8,  0);  // screen.x
+    mem.write16(env + 10, 0);  // screen.y
+    mem.write16(env + 12, 0);  // screen.w = 0 -> default
+    mem.write16(env + 14, 0);  // screen.h = 0 -> default
+    mem.write8(env + 16, 0);
+    mem.write8(env + 17, 0);
+
+    ctx.r[A0] = env;
+    hle_PutDispEnv(&ctx);
+
+    ASSERT_EQ(gp1Words.size(), 4u);
+    uint32_t gp1_07 = gp1Words[2];
+    uint32_t vStart = gp1_07 & 0x3FFu;
+    // v_start = screen.y + 0x13 (PAL offset, not the NTSC 0x10) = 19.
+    EXPECT_EQ(vStart, 19u);
+
+    uint32_t mode = gp1Words[3] & 0xFFu;
+    // Video mode bit (bit3) must be set for PAL.
+    EXPECT_EQ(mode & 0x08u, 0x08u);
+    // disp.h=280 is <= the PAL threshold (288), so the Vres/interlace combo
+    // (bit2+bit5) must NOT be set here, unlike the NTSC threshold (256)
+    // which PutDispEnvDisplayModeBitsMatchGp1_08Layout already pins at h=480.
+    EXPECT_EQ(mode & 0x24u, 0u);
+
+    // Restore to NTSC so other tests start clean (same pattern as
+    // PsyqGpuTest.SetGetVideoModeRoundTrip).
+    ctx.r[A0] = 0;
+    hle_libgpu_SetVideoMode(&ctx);
+}
+
 // SetDefDrawEnv
 //
 // Audited 2026-08-06 against the psyz decomp reference (workspace clone,
@@ -522,6 +610,29 @@ TEST_F(PsyqHleTest, SetDefDrawEnvSetsDfeFromHeightNtscThreshold) {
     mem.write32(ctx.r[SP] + 16, 480); // h = 480 > 256 -> dfe = 0
     hle_SetDefDrawEnv(&ctx);
     EXPECT_EQ(mem.read8(envTall + 23), 0u);
+}
+
+// Review finding (Important 3): ext.c:60-64 branches on GetVideoMode() for
+// the dfe threshold (video_mode ? h<=288 : h<=256). A pre-amendment revision
+// assumed NTSC unconditionally; PAL is reachable via libetc_SetVideoMode.
+TEST_F(PsyqHleTest, SetDefDrawEnvSetsDfeFromHeightPalThreshold) {
+    ctx.r[A0] = 1; // PAL
+    hle_libgpu_SetVideoMode(&ctx);
+
+    const uint32_t env = 0x5400;
+    ctx.r[A0] = env;
+    ctx.r[A1] = 0;
+    ctx.r[A2] = 0;
+    ctx.r[A3] = 320;
+    // h = 280: > NTSC threshold (256) but <= PAL threshold (288) -- if the
+    // video-mode branch were still dropped this would wrongly read dfe = 0.
+    mem.write32(ctx.r[SP] + 16, 280);
+    hle_SetDefDrawEnv(&ctx);
+    EXPECT_EQ(mem.read8(env + 23), 1u);
+
+    // Restore to NTSC so other tests start clean.
+    ctx.r[A0] = 0;
+    hle_libgpu_SetVideoMode(&ctx);
 }
 
 TEST_F(PsyqHleTest, SetDefDrawEnvWritesClipAndOffset) {

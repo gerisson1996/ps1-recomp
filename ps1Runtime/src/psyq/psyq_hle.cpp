@@ -2,8 +2,8 @@
 #include "runtime/emuptr.h"
 #include "runtime/memory.h"
 #include "runtime/metrics.h"
+#include "runtime/psyq/psyq_libgpu.h"
 #include "runtime/psyq/psyq_state.h"
-#include <algorithm>
 #include <chrono>
 #include <fmt/format.h>
 #include <thread>
@@ -229,6 +229,18 @@ struct DispEnv {
   uint8_t pad[2];             // 18, 19
 };
 static_assert(sizeof(DispEnv) == 20, "PsyQ DispEnv is 20 bytes");
+
+// Faithful port of the psyz decomp's CLAMP macro
+// (decomp/include/common.h:25): `#define CLAMP(x, min, max) x < min ? min
+// : (x > max ? max : x)`. Unlike std::clamp, this ternary has no precondition
+// on min <= max -- sys.c's own `CLAMP(h_end, h_start + 0x50, 3290)` can be
+// called with min > max whenever h_start is itself already near its ceiling
+// (reachable from screen.x >= 269, an in-range int16 read straight out of
+// game RAM), which is well-defined here (returns min) but is undefined
+// behavior under std::clamp. Match the macro's exact branch order instead.
+inline int32_t sourceClamp(int32_t x, int32_t lo, int32_t hi) {
+  return x < lo ? lo : (x > hi ? hi : x);
+}
 } // namespace
 
 void hle_SetDefDispEnv(recomp_context *ctx) {
@@ -264,26 +276,46 @@ void hle_SetDefDispEnv(recomp_context *ctx) {
 //     GP1(0x07) -- set vertical   display range
 //     GP1(0x08) -- set display mode (width, height, interlace)
 //
-// Audited 2026-08-06 against the psyz decomp reference (workspace clone,
+// Audited 2026-08-06, amended 2026-08-06 after review, against the psyz
+// decomp reference (workspace clone,
 // PS1Recomp-workspace/psyz/decomp/src/libgpu/sys.c:399-461). PutDispEnv
 // branches on info.version (GPU hardware type); the same retail/1MB-VRAM
 // branch this project's PutDrawEnv audit established applies here
-// (info.version 0/3) is used below:
+// (info.version 0/3) is used below. It also branches on GetVideoMode()
+// (env->pad0, NTSC=0/PAL=1) -- honoured explicitly via getVideoMode()
+// rather than assumed NTSC, since libetc_SetVideoMode is reachable from PS1
+// code (psyq_libgpu.cpp) and a PAL title would otherwise get silently wrong
+// values from code whose whole purpose is source fidelity:
 //
 //   GP1(0x05) -- sys.c:409-412: (disp.y & 0x3FF) << 10 | (disp.x & 0x3FF).
 //     The pre-audit code masked vx but not vy; an unmasked negative vy can
 //     shift into bits 24-26 and corrupt the 0x05 command nibble itself.
 //   GP1(0x06)/(0x07) -- sys.c:413-427: computed from DISPENV.screen (NOT
-//     .disp), with defaults when screen.w/h == 0 and hard clamps. This
-//     project only targets NTSC (GetVideoMode() default 0 / pad0 == false),
-//     so the PAL branch (0x13/310/312 constants) is not implemented; the
-//     pre-audit code used a fabricated disp.w/h-based formula that matched
-//     neither branch.
+//     .disp), with defaults when screen.w/h == 0 and hard clamps that
+//     depend on pad0 (v_start offset 0x10/0x13, v bounds 256,258/310,312).
+//     The pre-audit code used a fabricated disp.w/h-based formula that
+//     matched neither branch, and (pre-amendment) this project's own first
+//     audit pass hardcoded the NTSC constants instead of reading pad0.
+//     sys.c's own CLAMP(h_end, h_start + 0x50, 3290) call is reachable with
+//     its own min argument (h_start + 0x50) exceeding its max (3290)
+//     whenever screen.x >= 269 -- CLAMP's ternary (common.h:25) is
+//     well-defined there (returns min, "bug-compatible" with the source);
+//     see sourceClamp() above and the std::clamp-precondition finding this
+//     amendment fixes.
 //   GP1(0x08) -- sys.c:404, 428-457: bit layout matches psx-spx's documented
-//     GP1(08h) fields (docs/graphicsprocessingunitgpu.md) exactly, the same
-//     layout gpu.cpp's case 0x08 consumer already assumes. The pre-audit
-//     code put isrgb24 at bit5 and isinter at bit6 (both wrong) and never
-//     set the Hres2/368-mode bit, so producer and consumer disagreed.
+//     GP1(08h) fields (docs/graphicsprocessingunitgpu.md, "GP1(08h) -
+//     Display mode" table at line 770-779, GPUSTAT mapping 897-905) --
+//     NOTE: this is the correct citation; an earlier revision of this
+//     comment cited "line 377+", which is GP0(E1h) Draw Mode, a different
+//     register. The layout matches the same one gpu.cpp's case 0x08
+//     consumer assumes for bits 0-5 (Hres1/Vres/isrgb24/isinter), but NOT
+//     for bit 6 (Hres2/368-mode): gpu.cpp:418-428 maps GP1(08h) bits 0-5
+//     onto GPUSTAT bits 17-22 correctly, then lands bit 6 on GPUSTAT bit 23
+//     (Display Enable) instead of bit 16 -- a real but separate defect in
+//     gpu.cpp, out of this function's scope, logged for follow-up rather
+//     than fixed here (neither Crash nor Rayman uses 368-wide mode). The
+//     pre-audit code put isrgb24 at bit5 and isinter at bit6 (both wrong)
+//     and never set the Hres2 or video-mode bits.
 //     info.reverse (SetGraphReverse) is not tracked by this runtime, so
 //     that bit (0x80) is never set -- no game exercises it here.
 //
@@ -302,21 +334,22 @@ void hle_PutDispEnv(recomp_context *ctx) {
   int16_t sh   = static_cast<int16_t>(ctx->mem->read16(envPtr + 14));
   uint8_t isinter = ctx->mem->read8(envPtr + 16);
   uint8_t isrgb24 = ctx->mem->read8(envPtr + 17);
+  bool pal = getVideoMode() != 0; // sys.c: env->pad0 = GetVideoMode()
 
   // GP1(0x05): display start address
   g_cfg.writeGP1(0x05000000u | ((static_cast<uint32_t>(vy) & 0x3FFu) << 10) |
                                  (static_cast<uint32_t>(vx) & 0x3FFu));
 
-  // GP1(0x06)/(0x07): horizontal/vertical display range from DISPENV.screen
-  // (NTSC constants: v_start offset 0x10, v clamp bounds 256/258).
+  // GP1(0x06)/(0x07): horizontal/vertical display range from DISPENV.screen.
+  // v_start offset and v clamp bounds depend on pad0 (sys.c:414-422).
   int32_t hStart = static_cast<int32_t>(sx) * 10 + 0x260;
   int32_t hEnd   = hStart + (sw != 0 ? static_cast<int32_t>(sw) * 10 : 2560);
-  int32_t vStart = static_cast<int32_t>(sy) + 0x10;
+  int32_t vStart = static_cast<int32_t>(sy) + (pal ? 0x13 : 0x10);
   int32_t vEnd   = vStart + (sh != 0 ? static_cast<int32_t>(sh) : 240);
-  hStart = std::clamp(hStart, 500, 3290);
-  hEnd   = std::clamp(hEnd, hStart + 0x50, 3290);
-  vStart = std::clamp(vStart, 0x10, 256);
-  vEnd   = std::clamp(vEnd, vStart + 2, 258);
+  hStart = sourceClamp(hStart, 500, 3290);
+  hEnd   = sourceClamp(hEnd, hStart + 0x50, 3290);
+  vStart = sourceClamp(vStart, 0x10, pal ? 310 : 256);
+  vEnd   = sourceClamp(vEnd, vStart + 2, pal ? 312 : 258);
   g_cfg.writeGP1(0x06000000u | ((static_cast<uint32_t>(hEnd) & 0xFFFu) << 12) |
                                  (static_cast<uint32_t>(hStart) & 0xFFFu));
   g_cfg.writeGP1(0x07000000u | ((static_cast<uint32_t>(vEnd) & 0x3FFu) << 10) |
@@ -324,6 +357,7 @@ void hle_PutDispEnv(recomp_context *ctx) {
 
   // GP1(0x08): display mode
   uint32_t mode = 0;
+  if (pal) mode |= 0x08u; // video mode (sys.c:434-436)
   if (isrgb24) mode |= 0x10u;
   if (isinter) mode |= 0x20u;
   if (vw <= 280) {
@@ -337,8 +371,8 @@ void hle_PutDispEnv(recomp_context *ctx) {
   } else {
     mode |= 0x03u; // Hres1 = 3 (640)
   }
-  if (vh > 256) {
-    mode |= 0x24u; // Vres (bit2) + interlace (bit5) combo for >256-line modes
+  if (vh > (pal ? 288 : 256)) {
+    mode |= 0x24u; // Vres (bit2) + interlace (bit5) combo for >threshold-line modes
   }
   g_cfg.writeGP1(0x08000000u | mode);
 }
@@ -361,15 +395,20 @@ void hle_PutDispEnv(recomp_context *ctx) {
 //     +23 dfe      (uint8)  draw-to-display enable
 //     ... (DR_TPAGE follows)
 //
-// Audited 2026-08-06 against the psyz decomp reference (workspace clone,
+// Audited 2026-08-06, amended 2026-08-06 after review, against the psyz
+// decomp reference (workspace clone,
 // PS1Recomp-workspace/psyz/decomp/src/libgpu/ext.c:46-69):
 //   env->tpage = getTPage(0, 0, 640, 0)       -- always this fixed value,
 //     independent of the x/y/w/h args, evaluating (via this project's own
 //     already-audited GetTPage formula, psyq_libgpu.cpp) to
 //     (640 & 0x3FF) >> 6 = 0x0A.
-//   env->dfe = video_mode ? h <= 288 : h <= 256 -- this project has no PAL
-//     path (GetVideoMode() defaults to and stays NTSC/0), so the h <= 256
-//     branch is used unconditionally.
+//   env->dfe = video_mode ? h <= 288 : h <= 256 -- honoured explicitly via
+//     getVideoMode() rather than assumed NTSC (amended after review: an
+//     earlier revision of this comment asserted GetVideoMode() "defaults to
+//     and stays NTSC/0" as an invariant, but libetc_SetVideoMode is
+//     reachable from PS1 code -- see hle_libgpu_SetVideoMode,
+//     psyq_libgpu.cpp -- so a PAL title would silently get a wrong dfe from
+//     code whose whole purpose is source fidelity).
 // The pre-audit implementation hardcoded tpage=0 and dfe=0, ignoring both
 // GetTPage and the height threshold.
 void hle_SetDefDrawEnv(recomp_context *ctx) {
@@ -378,6 +417,7 @@ void hle_SetDefDrawEnv(recomp_context *ctx) {
   int16_t  y  = static_cast<int16_t>(ctx->r[A2]);
   int16_t  w  = static_cast<int16_t>(ctx->r[A3]);
   int16_t  h  = static_cast<int16_t>(ctx->mem->read32(ctx->r[SP] + 16));
+  bool pal = getVideoMode() != 0; // ext.c: video_mode = GetVideoMode()
 
   // clip rect
   ctx->mem->write16(envPtr + 0, static_cast<uint16_t>(x));
@@ -395,8 +435,8 @@ void hle_SetDefDrawEnv(recomp_context *ctx) {
   // tpage = getTPage(0, 0, 640, 0) = 0x0A (ext.c:67), dtd=1 (dithering)
   ctx->mem->write16(envPtr + 20, 0x000Au);
   ctx->mem->write8(envPtr + 22, 1); // dtd
-  // dfe = h <= 256 (NTSC branch, ext.c:60-64)
-  ctx->mem->write8(envPtr + 23, h <= 256 ? 1 : 0);
+  // dfe = video_mode ? h <= 288 : h <= 256 (ext.c:60-64)
+  ctx->mem->write8(envPtr + 23, h <= (pal ? 288 : 256) ? 1 : 0);
 
   ctx->r[V0] = envPtr;
 }
