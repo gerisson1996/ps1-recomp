@@ -290,36 +290,96 @@ void hle_libgs_GsDefDispBuff(recomp_context *ctx) {
 // release-mode behaviour (psyz decomp libgpu/sys.c:249).
 void hle_libgpu_checkRECT(recomp_context *ctx) { (void)ctx; }
 
-// _addque2(exec, p1, len, p2) -- PSY-Q internal GPU op queue (libgpu
-// sys.c). LoadImage/StoreImage/ClearImage/MoveImage/DrawOTag/PutDrawEnv all
-// enqueue their device routine here. On real hardware `len` bytes of p1 are
-// queued and `exec(p1, p2)` runs once the GPU is idle.
+// _addque2(exec, p1, len, p2) -- PSY-Q internal GPU op queue (libgpu sys.c).
+// LoadImage/StoreImage/ClearImage/DrawOTag/PutDrawEnv all submit their device
+// routine through here.
 //
-// NOT VERIFIED against an admissible source. The decomp's _addque2 is
-// declaration-only (`INCLUDE_ASM(...)`, sys.c:866) and the clone carries no
-// matching entry under asm/nonmatchings/, so the real queueing behaviour --
-// in particular whether `len` bytes of p1 are copied before exec runs -- is
-// unconfirmed. What we implement matches psyz's PC *reimplementation*
-// (psyz/psyz/src/psyz/libgpu.c:178-181), which collapses the queue to an
-// immediate `return exec(p1, p2)` with `len` dead. That is a port, not the
-// decomp, so it does not satisfy this project's citation rule; it is recorded
-// here as the basis for the current shape, not as verification.
+// Audited 2026-08-08 by disassembling the Crash binary, which the phase-1 plan
+// admits as a source. The previous note here cited psyz's PC reimplementation
+// (psyz/src/psyz/*.c) -- a port, not the decomp -- and was withdrawn in 750b401;
+// the decomp body is `INCLUDE_ASM` only (psyz decomp/src/libgpu/sys.c:866, with
+// no matching entry under asm/nonmatchings/libgpu/sys/). This comment replaces
+// that citation entirely.
 //
-// Closing this properly needs the disassembly of _addque2 in the Crash binary,
-// which the phase plan does admit as a source. Until then the audit registry
-// must keep this HLE as `nao-auditada`.
+// Source: test_roms/Crash Bandicoot /Crash Bandicoot (USA).bin.boot.exe,
+// PS-EXE t_addr=0x80010000, 0x800 header => file offset = va - 0x80010000 +
+// 0x800. _addque2 spans 0x80042000..0x800422E0 (file 0x32800..0x32AE0).
+// Full listing: .superpowers/sdd/phase-1-hle-audit/addque2.dis (gitignored).
 //
-// Our `exec == 0` guard has no source counterpart -- real callers always pass
-// a valid device routine. It is a defensive addition of ours; the test that
-// pins it says so explicitly.
-// The `exec == 0` guard is a defensive addition with no source counterpart
-// (real code has no null check); harmless because every real caller in this
-// codebase (LoadImage/_dws, StoreImage/_drs, ClearImage/_clr, DrawOTag's and
-// PutDrawEnv's cwc) always passes a valid function pointer.
+// That 0x80042000 really is libgpu's _addque2 is established by the binary
+// itself, not by the config's naming:
+//   * 0x80042000 and 0x80041FDC sit as adjacent words at 0x80054A2C/0x80054A28
+//     in a function-pointer table whose slot 0 (0x80054A24) holds the string
+//     "$Id: sys.c,v 1.120 1996/05/01 12:09:07 noda Exp $" -- PSY-Q libgpu's
+//     own RCS tag.
+//   * 0x80041FDC's whole body is `a3 = a2; a2 = 0; tailcall 0x80042000` --
+//     which is `_addque` as the decomp spells it out at
+//     psyz decomp/src/libgpu/sys.c:862-864, `int _addque(int (*exec)(u_long,
+//     u_long), u_long p1, u_long p2) { return _addque2(exec, p1, 0, p2); }`.
+//     So the routine 0x80041FDC tail-calls is _addque2 by construction.
+//   * Every caller loads that table and calls slot +0x08. LoadImage
+//     (0x80040484) passes a0 = slot +0x20 (= _dws, 0x800419E4, the address
+//     configs/crash_recomp.toml:528-529 also assigns to libgpu__dws) and
+//     a2 = 8 = sizeof(RECT) -- exactly sys.c:280-284's `return
+//     D_800B8920->addque2(D_800B8920->dws, rect, sizeof(RECT), p)`.
+//
+// Semantics derived instruction by instruction (register file: s3=exec,
+// s0=p1, s1=len, s2=p2):
+//
+//   0x80042024  arm a VSync(-1)-based timeout (0x80042864)
+//   0x8004204c  if ((head+1) & 0x3F) == tail  -> queue full: poll 0x80042898,
+//               return -1 if it reports timeout, else run _exeque and retry
+//   0x8004206c  saved_mask = SetIntrMask(0)      (0x8003E870 swaps *0x1F801074)
+//   0x80042094  if queue-enable byte [0x80054A6D] == 0 -> immediate path
+//               else immediate path only if ALL of:
+//                 head == tail                    (queue empty)
+//                 !(*D2_CHCR & 0x01000000)        (GPU DMA not busy)
+//                 [0x80054A78] == 0               (no DrawSync callback)
+//   immediate path (0x800420EC..0x80042148):
+//               spin until (*GPUSTAT & 0x04000000); exec(p1, p2) via `jalr s3`;
+//               record exec/p1/p2 into 0x80054B60/64/68; SetIntrMask(saved);
+//               *** return 0 *** (`move v0,zero` at 0x80042148)
+//   enqueue path (0x8004214C..0x800422C0):
+//               register _exeque as the DMA callback, copy len/4 words of p1
+//               into a 96-byte ring slot, store exec/p2/(&slot.buf or p1),
+//               head = (head+1) & 0x3F, restore mask, run _exeque, and
+//               return (head - tail) & 0x3F -- the queue depth.
+//
+// The register identities above are read out of the binary, not assumed: the
+// pointer table holds 0x1F801814 (GPUSTAT/GP1) at 0x80054B40, 0x1F8010A8
+// (D2_CHCR) at 0x80054B4C and 0x1F801074 (I_MASK) at 0x800549C4, and the
+// timeout printf at 0x800428E8 formats exactly those, in that order, against
+// "GPU timeout:que=%d,stat=%08x,chcr=%08x,madr=%08x," (0x80011350).
+//
+// What this HLE models is the immediate path, and that is the correct choice
+// here: this runtime's GPU is synchronous, so the queue is always empty, DMA2
+// is never left busy, and Crash never installs a DrawSync callback -- the three
+// conditions that select it. Consequences, all confirmed above:
+//   * `len` (A2) is genuinely unused: the immediate path hands the caller's own
+//     p1 to exec and never touches the ring's copy buffer.
+//   * p2 comes from A3, and exec is called as exec(p1, p2).
+//   * the return value is 0, not exec's. This was the one proven divergence --
+//     we previously let exec's V0 leak through, which happened to be 0 for
+//     every executor we dispatch (_dws and _cwc both force V0=0) but was not
+//     guaranteed. Callers tail-return this value (LoadImage at 0x800404D0-D8
+//     restores RA and returns straight after the jalr), so it is observable.
+//
+// Not modelled, deliberately: the interrupt-mask critical section, the GPUSTAT
+// ready-to-receive spin, the 64-slot ring and its len/4 word copy, the queue
+// -full retry with its VSync(-1) + 240 deadline, and the -1 timeout return.
+// All of them exist only to serialise against an asynchronous GPU/DMA that this
+// runtime does not have. Note the ring copy has no bound check against the
+// 84-byte slot buffer, so a hypothetical len > 84 would corrupt the next slot;
+// no caller in this binary passes anything but 0 or 8.
+//
+// The `exec == 0` guard is a defensive addition with no source counterpart --
+// 0x80042110 is an unconditional `jalr s3`. Every real caller (LoadImage/_dws,
+// StoreImage/_drs, ClearImage/_clr, DrawOTag's and PutDrawEnv's _cwc) passes a
+// valid routine. The test that pins it says so explicitly.
 void hle_libgpu__addque2(recomp_context *ctx) {
   uint32_t exec = ctx->r[A0];
   uint32_t p1   = ctx->r[A1];
-  uint32_t p2   = ctx->r[A3]; // (A2 = len, only needed for the deferred copy)
+  uint32_t p2   = ctx->r[A3]; // (A2 = len; dead on the immediate path)
   if (exec == 0) {
     ctx->r[V0] = 0;
     return;
@@ -329,9 +389,12 @@ void hle_libgpu__addque2(recomp_context *ctx) {
   ctx->r[A1] = p2;
   recomp_dispatch(ctx->mem->ramPtr(), ctx, exec);
   ctx->r[RA] = ra;
+  ctx->r[V0] = 0; // immediate path returns 0, not exec's value (0x80042148)
 }
 
-// _addque(exec, p1, p2) -- 3-arg sibling of _addque2 (no deferred copy).
+// _addque(exec, p1, p2) -- 3-arg sibling of _addque2. Its entire body at
+// 0x80041FDC is `a3 = a2; a2 = 0; jal _addque2`, so it is _addque2 with len=0,
+// with the same return value. See the _addque2 note above for the audit.
 void hle_libgpu__addque(recomp_context *ctx) {
   uint32_t exec = ctx->r[A0];
   uint32_t p1   = ctx->r[A1];
@@ -345,6 +408,7 @@ void hle_libgpu__addque(recomp_context *ctx) {
   ctx->r[A1] = p2;
   recomp_dispatch(ctx->mem->ramPtr(), ctx, exec);
   ctx->r[RA] = ra;
+  ctx->r[V0] = 0;
 }
 
 // _dws(rect*, data*) -- device write: the queued executor behind LoadImage

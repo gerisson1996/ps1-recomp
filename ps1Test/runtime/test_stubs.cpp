@@ -4,9 +4,14 @@
 #include <cstdint>
 #include <runtime/cpu_context.h>
 
+// Opt-in hook letting a test stand in for the dispatched target, so HLEs that
+// call through recomp_dispatch (e.g. libgpu__addque2 invoking its device
+// routine) can be asserted on what the callee actually observes and returns.
+// Null by default: recomp_dispatch stays a no-op for every other test.
+void (*g_testRecompDispatchHook)(recomp_context *ctx, uint32_t addr) = nullptr;
+
 // Stub recomp_dispatch -- called by EventSystem and Bios drainPendingCallbacks.
-// In tests we simply do nothing.
-void recomp_dispatch(uint8_t * /*rdram*/, recomp_context * /*ctx*/,
-                     uint32_t /*addr*/) {
-  // no-op in test builds
+void recomp_dispatch(uint8_t * /*rdram*/, recomp_context *ctx, uint32_t addr) {
+  if (g_testRecompDispatchHook)
+    g_testRecompDispatchHook(ctx, addr);
 }

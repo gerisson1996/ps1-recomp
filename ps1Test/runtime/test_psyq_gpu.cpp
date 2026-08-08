@@ -180,41 +180,101 @@ TEST_F(PsyqGpuTest, DwsDispatchesLikeLoadImageAndReturnsZero) {
 
 // _addque2
 //
-// _addque2(exec, p1, len, p2) is NOT verified against an admissible source.
-// The decomp body is `INCLUDE_ASM`-only (sys.c:866) with no matching entry
-// under asm/nonmatchings/, so the real queueing behaviour is unconfirmed.
-// psyz's PC *reimplementation* (psyz/psyz/src/psyz/libgpu.c:178-181),
-//   static int psyz_addque2(int (*exec)(u_long,u_long), u_long p1, int len,
-//                            u_long p2) { return exec(p1, p2); }
-// is a port, not the decomp, so it does not satisfy this project's citation
-// rule -- it is only the basis for the shape we implement. Closing this needs
-// the disassembly of _addque2 in the Crash binary. See the fuller note on
-// hle_libgpu__addque2 in psyq_libgpu.cpp.
+// Audited 2026-08-08 against the disassembly of _addque2 at 0x80042000 in
+// test_roms/Crash Bandicoot /Crash Bandicoot (USA).bin.boot.exe -- the source
+// the phase-1 plan admits alongside the decomp, used because the decomp body
+// is `INCLUDE_ASM`-only (decomp/src/libgpu/sys.c:866). The earlier note here
+// cited psyz's PC reimplementation, which is a port and not admissible; it was
+// withdrawn in 750b401. Listing and derivation:
+// .superpowers/sdd/phase-1-hle-audit/addque2.dis and task-4c-report.md, and
+// the instruction-level summary above hle_libgpu__addque2 in psyq_libgpu.cpp.
 //
-// What the tests below can therefore prove is narrow: argument routing
-// (p1->a0, p2 from a3 not a2, RA restored) and that _addque2 does not invent
-// a V0 of its own. The test build's recomp_dispatch (test_stubs.cpp) is a
-// no-op, so no test here can show V0 originating in exec.
+// The three facts the tests below pin, and where each comes from:
+//   * exec is called as exec(p1, p2), p2 taken from a3 -- `move a0,s0;
+//     move a1,s2; jalr s3` at 0x8004210C-0x80042114, with s0=a1(p1) and
+//     s2=a3(p2) from the prologue at 0x80042010/0x80042028.
+//   * `len` (a2) is dead on this path -- the immediate path passes the
+//     caller's own p1 through and never reaches the ring-copy loop at
+//     0x80042164, which is the only reader of s1=len.
+//   * the return value is 0, NOT exec's -- `move v0,zero` at 0x80042148, in
+//     the delay slot of the jump to the epilogue. Callers tail-return it
+//     (LoadImage at 0x800404D0 restores RA immediately after the jalr), so
+//     this is observable to the game.
 
-TEST_F(PsyqGpuTest, AddQue2ForwardsP1AndP2ToExecArgsAndPreservesReturnValue) {
+// Installs a stand-in for the dispatched device routine so these tests can see
+// what exec receives and prove _addque2 discards what exec returns.
+extern void (*g_testRecompDispatchHook)(recomp_context *, uint32_t);
+
+namespace {
+struct ScopedDispatchHook {
+  explicit ScopedDispatchHook(void (*fn)(recomp_context *, uint32_t)) {
+    g_testRecompDispatchHook = fn;
+  }
+  ~ScopedDispatchHook() { g_testRecompDispatchHook = nullptr; }
+};
+
+// Observations recorded by the stand-in exec.
+struct ExecObservation {
+  int calls = 0;
+  uint32_t addr = 0, a0 = 0, a1 = 0;
+};
+ExecObservation g_exec;
+} // namespace
+
+TEST_F(PsyqGpuTest, AddQue2CallsExecWithP1AndP2AndReturnsZeroNotExecsValue) {
   psyq_register_libgpu_extras();
-  ctx.r[A0] = 0x80012340u; // exec (nonzero -- must not take the null path)
+  g_exec = ExecObservation{};
+  ScopedDispatchHook hook([](recomp_context *c, uint32_t addr) {
+    g_exec.calls++;
+    g_exec.addr = addr;
+    g_exec.a0 = c->r[A0];
+    g_exec.a1 = c->r[A1];
+    c->r[V0] = 0x5A5A5A5Au; // exec returns nonzero; _addque2 must discard it
+  });
+
+  ctx.r[A0] = 0x80012340u; // exec
   ctx.r[A1] = 0x80100000u; // p1
-  ctx.r[A2] = 0x99u;       // len -- must be ignored (a2 is dead per source)
+  ctx.r[A2] = 0x99u;       // len -- dead on the immediate path
   ctx.r[A3] = 0x80200000u; // p2
   ctx.r[RA] = 0x80099999u;
-  ctx.r[V0] = 0xDEADBEEFu; // sentinel: a real exec would set this via V0
 
   psyq_dispatch("libgpu__addque2", &ctx);
 
-  EXPECT_EQ(ctx.r[A0], 0x80100000u) << "p1 must land in exec's a0";
-  EXPECT_EQ(ctx.r[A1], 0x80200000u) << "p2 (a3, not a2=len) must land in exec's a1";
-  // recomp_dispatch is a no-op in the test build, so this can only prove that
-  // _addque2 does not clobber V0 itself. It cannot prove V0 came from exec --
-  // that would need a dispatch stub that writes V0.
-  EXPECT_EQ(ctx.r[V0], 0xDEADBEEFu)
-      << "_addque2 must not overwrite V0 with a value of its own";
+  EXPECT_EQ(g_exec.calls, 1) << "exec must be invoked exactly once";
+  EXPECT_EQ(g_exec.addr, 0x80012340u) << "a0 selects the routine to dispatch";
+  EXPECT_EQ(g_exec.a0, 0x80100000u) << "exec's a0 is p1 (0x8004210C)";
+  EXPECT_EQ(g_exec.a1, 0x80200000u)
+      << "exec's a1 is p2 from a3, not a2=len (0x80042114)";
+  EXPECT_EQ(ctx.r[V0], 0u)
+      << "immediate path returns 0, not exec's value (0x80042148)";
   EXPECT_EQ(ctx.r[RA], 0x80099999u) << "RA must be restored after the call";
+}
+
+// _addque(exec, p1, p2) is _addque2 with len=0: its whole body at 0x80041FDC is
+// `move a3,a2; move a2,zero; jal 0x80042000`. So p2 comes from a2 here, and the
+// return value is the same 0.
+TEST_F(PsyqGpuTest, AddQueTakesP2FromA2AndAlsoReturnsZero) {
+  psyq_register_libgpu_extras();
+  g_exec = ExecObservation{};
+  ScopedDispatchHook hook([](recomp_context *c, uint32_t addr) {
+    g_exec.calls++;
+    g_exec.addr = addr;
+    g_exec.a0 = c->r[A0];
+    g_exec.a1 = c->r[A1];
+    c->r[V0] = 0x5A5A5A5Au;
+  });
+
+  ctx.r[A0] = 0x80012340u; // exec
+  ctx.r[A1] = 0x80100000u; // p1
+  ctx.r[A2] = 0x80200000u; // p2 (3-arg form)
+  ctx.r[A3] = 0xBADBAD00u; // must be ignored
+
+  psyq_dispatch("libgpu__addque", &ctx);
+
+  EXPECT_EQ(g_exec.calls, 1);
+  EXPECT_EQ(g_exec.a0, 0x80100000u);
+  EXPECT_EQ(g_exec.a1, 0x80200000u) << "_addque takes p2 from a2";
+  EXPECT_EQ(ctx.r[V0], 0u);
 }
 
 // Pins OUR defensive null guard, not PsyQ semantics: the real _addque2 has no
