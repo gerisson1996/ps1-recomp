@@ -101,6 +101,7 @@ add_executable(ps1Runtime_tests
     runtime/test_psyq_libc.cpp
     runtime/test_psyq_state.cpp
     runtime/test_metrics.cpp
+    runtime/test_gool.cpp
     runtime/test_golden_frame.cpp
 )
 
