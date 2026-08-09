@@ -964,21 +964,20 @@ void hle_gool_InterpretObject(recomp_context *ctx) {
     emu_bind(rdram, ctx);
   ++calls;
 
-  // Go/no-go instrument: sample the NS hash-table words @0x8005C530 at the
-  // first calls and every power of two, so a run shows whether interpreting
-  // GOOL populates them (hypothesis A) or not (hypothesis B).
-  if (calls <= 4 || (calls & (calls - 1)) == 0) {
+  // Entry sampler: object state at the first calls and every power of two.
+  // Gated behind PS1_GOOL_TRACE like every other diagnostic in this file --
+  // it used to print unconditionally because it was the go/no-go instrument
+  // for the "does interpreting GOOL populate the NS hash table" question,
+  // which closed on 2026-07-09 (hypothesis A confirmed). The hash-table words
+  // it sampled for that question went with it; `gool.interpret` in the metric
+  // report is the uncapped call count now.
+  if (traceLevel() >= 1 && (calls <= 4 || (calls & (calls - 1)) == 0)) {
     uint32_t objAddr = ctx->r[4];
-    uint32_t pcv =
-        objAddr ? EMU_ReadU32(objAddr + offsetof(goolobj, pc)) : 0;
     std::fprintf(stderr,
-                 "[GOOL] interpret #%u obj=0x%08X flags=0x%X pc=0x%08X | "
-                 "hash@0x8005C530: %08X %08X %08X %08X | constbuf=%08X "
-                 "bufidx=%08X sp=%08X fp=%08X local=%08X\n",
-                 calls, objAddr, ctx->r[5], pcv, EMU_ReadU32(0x8005C530),
-                 EMU_ReadU32(0x8005C534), EMU_ReadU32(0x8005C538),
-                 EMU_ReadU32(0x8005C53C), EMU_ReadU32(0x80056480),
-                 EMU_ReadU32(0x80056484),
+                 "[GOOL] interpret #%u obj=0x%08X flags=0x%X pc=0x%08X "
+                 "sp=%08X fp=%08X local=%08X\n",
+                 calls, objAddr, ctx->r[5],
+                 objAddr ? EMU_ReadU32(objAddr + offsetof(goolobj, pc)) : 0,
                  objAddr ? EMU_ReadU32(objAddr + offsetof(goolobj, sp)) : 0,
                  objAddr ? EMU_ReadU32(objAddr + offsetof(goolobj, fp)) : 0,
                  objAddr ? EMU_ReadU32(objAddr + offsetof(goolobj, local)) : 0);
