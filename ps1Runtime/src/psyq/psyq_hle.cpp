@@ -271,10 +271,17 @@ void hle_SetDefDispEnv(recomp_context *ctx) {
   env->disp_y   = y;
   env->disp_w   = w;
   env->disp_h   = h;
+  // All four screen fields are zero, not the w/h just written into disp
+  // (ext.c:72-86: `env->screen.x = 0; env->screen.y = 0; env->screen.w = 0;
+  // env->screen.h = 0;`). PutDispEnv builds GP1(06)/(07) *from* screen and
+  // substitutes its own defaults for a zero w/h (2560 tenths of a pixel /
+  // 240 lines, sys.c:416-417), so seeding screen with w/h skips those
+  // defaults: for a 320x240 setup the reference gets h_end = 608 + 2560 =
+  // 3168, while w=320 gave 608 + 3200 = 3808, clamped down to 3290.
   env->screen_x = 0;
   env->screen_y = 0;
-  env->screen_w = w;
-  env->screen_h = h;
+  env->screen_w = 0;
+  env->screen_h = 0;
   env->isinter  = 0; // non-interlaced
   env->isrgb24  = 0; // RGB15
   env->pad[0]   = 0;

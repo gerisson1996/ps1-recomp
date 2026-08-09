@@ -331,6 +331,60 @@ TEST_F(PsyqHleTest, SetDefDispEnvWritesFields) {
     EXPECT_EQ(ctx.r[V0],            env);  // returns env ptr
 }
 
+// ext.c:72-86 zeroes all four DISPENV.screen fields; it does NOT seed them
+// from w/h. This was inert until PutDispEnv started building GP1(06)/(07)
+// from .screen, at which point `screen.w = w` suppressed the source's own
+// screen.w == 0 default. Poison the struct first: the fields are asserted to
+// be zero, and a zeroed Memory would let a no-write pass by accident.
+TEST_F(PsyqHleTest, SetDefDispEnvZeroesAllScreenFields) {
+    const uint32_t env = 0x3100;
+    for (uint32_t i = 0; i < 20; i += 2)
+        mem.write16(env + i, 0xBEEFu);
+
+    ctx.r[A0] = env;
+    ctx.r[A1] = 0;   // x
+    ctx.r[A2] = 0;   // y
+    ctx.r[A3] = 320; // w
+    mem.write32(ctx.r[SP] + 16, 240); // h
+
+    hle_SetDefDispEnv(&ctx);
+
+    EXPECT_EQ(mem.read16(env + 8),  0u); // screen.x
+    EXPECT_EQ(mem.read16(env + 10), 0u); // screen.y
+    EXPECT_EQ(mem.read16(env + 12), 0u); // screen.w -- NOT w
+    EXPECT_EQ(mem.read16(env + 14), 0u); // screen.h -- NOT h
+}
+
+// Nothing in the suite composed the two functions: every PutDispEnv test
+// hand-writes .screen to the reference's zeros, so SetDefDispEnv seeding it
+// with w/h went unnoticed. Run them back to back on one struct, the way a
+// game does, and pin the horizontal range that comes out.
+//   reference: h_start = 0*10 + 0x260 = 608, screen.w == 0 -> h_end =
+//              608 + 2560 = 3168 (sys.c:415-417)
+//   pre-fix:   screen.w = 320 -> h_end = 608 + 3200 = 3808, clamped to 3290
+// The vertical axis agrees either way (16 + 240 = 256), which hid half of it.
+TEST_F(PsyqHleTest, SetDefDispEnvThenPutDispEnvUsesReferenceScreenDefaults) {
+    const uint32_t env = 0x3200;
+    ctx.r[A0] = env;
+    ctx.r[A1] = 0;
+    ctx.r[A2] = 0;
+    ctx.r[A3] = 320;
+    mem.write32(ctx.r[SP] + 16, 240);
+    hle_SetDefDispEnv(&ctx);
+
+    ctx.r[A0] = env;
+    hle_PutDispEnv(&ctx);
+
+    ASSERT_EQ(gp1Words.size(), 4u);
+    const uint32_t gp1_06 = gp1Words[1];
+    EXPECT_EQ(gp1_06 & 0xFFFu, 608u);          // h_start
+    EXPECT_EQ((gp1_06 >> 12) & 0xFFFu, 3168u); // h_end
+
+    const uint32_t gp1_07 = gp1Words[2];
+    EXPECT_EQ(gp1_07 & 0x3FFu, 16u);
+    EXPECT_EQ((gp1_07 >> 10) & 0x3FFu, 256u);
+}
+
 // PutDispEnv
 //
 // Audited 2026-08-06, amended 2026-08-06 after review, against the psyz
