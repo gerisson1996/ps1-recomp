@@ -721,6 +721,10 @@ int main(int argc, char *argv[]) {
       fmt::print("[Main] Game thread did not finish in 2s -- forcing exit "
                  "(skipping destructors to avoid UAF race)\n");
       fmt::print("Simulation ended after {} frames.\n", frameCount);
+      // Re-publish: the game thread kept issuing GP0 words during the 2s
+      // deadline above.  publishMetrics() only hands over what has accrued
+      // since the call before the join, so this adds those words without
+      // doubling the ones already reported.
       gpu.publishMetrics();
       ps1::metrics::dumpJson();
       std::_Exit(0);

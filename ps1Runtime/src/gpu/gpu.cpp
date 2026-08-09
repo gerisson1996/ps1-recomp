@@ -1741,16 +1741,22 @@ void GPU::rasterizeGouraudTexturedTriangle(Vertex v0, Vertex v1, Vertex v2,
 }
 
 void GPU::publishMetrics() const {
+  // ps1::metrics::count() accumulates, so publish the delta since the last
+  // call rather than the whole histogram: main_host calls this from both
+  // shutdown paths, and re-publishing the totals doubled every gp0.op.XX.
   char name[16];
   for (int op = 0; op < 256; ++op) {
     const uint64_t n = gp0Hist_[op].load(std::memory_order_relaxed);
-    if (n == 0)
+    const uint64_t delta = n - gp0HistPublished_[op];
+    if (delta == 0)
       continue;
+    gp0HistPublished_[op] = n;
     std::snprintf(name, sizeof(name), "gp0.op.%02X", op);
-    ps1::metrics::count(name, n);
+    ps1::metrics::count(name, delta);
   }
-  ps1::metrics::count("gp0.words",
-                      gp0Words_.load(std::memory_order_relaxed));
+  const uint64_t words = gp0Words_.load(std::memory_order_relaxed);
+  ps1::metrics::count("gp0.words", words - gp0WordsPublished_);
+  gp0WordsPublished_ = words;
 }
 
 } // namespace ps1::gpu

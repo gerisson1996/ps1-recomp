@@ -1,5 +1,7 @@
 #include "runtime/metrics.h"
 
+#include "runtime/gpu/gpu.h"
+
 #include <cstdio>
 #include <fstream>
 #include <gtest/gtest.h>
@@ -65,6 +67,43 @@ TEST_F(MetricsTest, DumpJsonWritesCountersAndState) {
   EXPECT_NE(body.find("\"frames\": 42"), std::string::npos) << body;
   EXPECT_NE(body.find("\"display.y\": -7"), std::string::npos) << body;
   std::remove(path);
+}
+
+// main_host.cpp reaches GPU::publishMetrics() from two shutdown paths -- the
+// normal join and the forced `_Exit` taken whenever the recompiled game thread
+// is still spinning -- and count() accumulates.  Publishing the whole
+// histogram on both paths doubled every reported gp0.op.XX and gp0.words.
+TEST_F(MetricsTest, GpuPublishMetricsDoesNotDoubleOnSecondShutdownPath) {
+  ps1::gpu::GPU gpu;
+  gpu.writeGP0(0xE1000000u); // draw mode
+  gpu.writeGP0(0xE1000000u);
+  gpu.writeGP0(0xE6000000u); // mask bit setting
+
+  gpu.publishMetrics();
+  ASSERT_EQ(ps1::metrics::get("gp0.op.E1"), 2u);
+  ASSERT_EQ(ps1::metrics::get("gp0.op.E6"), 1u);
+  ASSERT_EQ(ps1::metrics::get("gp0.words"), 3u);
+
+  gpu.publishMetrics();
+  EXPECT_EQ(ps1::metrics::get("gp0.op.E1"), 2u);
+  EXPECT_EQ(ps1::metrics::get("gp0.op.E6"), 1u);
+  EXPECT_EQ(ps1::metrics::get("gp0.words"), 3u);
+}
+
+// ...but the second call is not a plain no-op: the game thread keeps issuing
+// GP0 words during main_host's 2s join deadline, and the forced-exit report
+// has to include them so gp0.* stays consistent with the live counters
+// (cpu_to_vram etc.) written in that same window.
+TEST_F(MetricsTest, GpuPublishMetricsReportsTrafficBetweenCalls) {
+  ps1::gpu::GPU gpu;
+  gpu.writeGP0(0xE1000000u);
+  gpu.publishMetrics();
+  ASSERT_EQ(ps1::metrics::get("gp0.op.E1"), 1u);
+
+  gpu.writeGP0(0xE1000000u);
+  gpu.publishMetrics();
+  EXPECT_EQ(ps1::metrics::get("gp0.op.E1"), 2u);
+  EXPECT_EQ(ps1::metrics::get("gp0.words"), 2u);
 }
 
 } // namespace

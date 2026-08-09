@@ -78,7 +78,11 @@ public:
   // Get a pointer to the 1024x512 VRAM framebuffer (live -- game thread writes here)
   const Color16 *getVRAM() const { return vram_.data(); }
 
-  /// Push accumulated GPU counters into ps1::metrics.  Call once at shutdown.
+  /// Push accumulated GPU counters into ps1::metrics at shutdown.
+  /// `ps1::metrics::count()` accumulates, so this publishes only what has
+  /// accrued since the previous call: main_host reaches this from two
+  /// shutdown paths (normal join and the forced `_Exit`), and a flat
+  /// re-publish would double every `gp0.op.XX` and `gp0.words`.
   void publishMetrics() const;
 
   // Load 1024x512x2 bytes of VRAM from a save-state buffer.
@@ -141,6 +145,12 @@ private:
   // thread at shutdown, hence atomic.  Indexed by the command byte.
   mutable std::atomic<uint64_t> gp0Hist_[256]{};
   mutable std::atomic<uint64_t> gp0Words_{0};
+
+  // High-water marks of what publishMetrics() has already handed to
+  // ps1::metrics.  Only ever touched by publishMetrics(), which runs on the
+  // main thread at shutdown, so these need no synchronisation of their own.
+  mutable uint64_t gp0HistPublished_[256]{};
+  mutable uint64_t gp0WordsPublished_{0};
 
   // Command buffering
   std::deque<uint32_t> commandQueue_;
