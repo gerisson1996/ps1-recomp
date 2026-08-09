@@ -175,9 +175,18 @@ void hle_libgpu_SetDispMask(recomp_context *ctx) {
 // Neither is exercised by Crash's 1458 uploads (all in-range, none empty), so
 // changing them now would be an unmeasured behaviour change on the one path
 // that currently renders. Revisit if a game depends on either.
+//
+// Return value: `int LoadImage(RECT*, u_long*)` tail-returns _addque2's value
+// (sys.c:280-284 -- the `return` is on the addque2 call, with no early exit),
+// and _addque2's immediate path returns 0, proven by disassembly of the Crash
+// binary (`move v0,zero` at 0x80042148; LoadImage at 0x800404D0-D8 restores RA
+// and returns straight after the jalr). See hle_libgpu__addque2 below for the
+// full trace. So V0 = 0 on every path, including the empty-rect early return,
+// which the source does not have at all.
 void hle_libgpu_LoadImage(recomp_context *ctx) {
   PsyqRect r = readRect(ctx, ctx->r[A0]);
   uint32_t src = ctx->r[A1];
+  ctx->r[V0] = 0;
   if (r.w <= 0 || r.h <= 0) return;
 
   writeGP0(0x01000000u); // GP0(0x01): Clear Cache

@@ -617,6 +617,17 @@ TEST_F(PsyqHleTest, PutDispEnvHonoursPalVideoModeForRangeAndModeBit) {
     hle_libgpu_SetVideoMode(&ctx);
 }
 
+// `DISPENV* PutDispEnv(DISPENV* env)` returns env (sys.c:399, 460). The HLE
+// left V0 untouched, so a caller doing `disp = PutDispEnv(disp)` picked up
+// whatever the previous call left in the register.
+TEST_F(PsyqHleTest, PutDispEnvReturnsEnvPointer) {
+    const uint32_t env = 0x4600;
+    ctx.r[A0] = env;
+    ctx.r[V0] = 0xDEADBEEFu;
+    hle_PutDispEnv(&ctx);
+    EXPECT_EQ(ctx.r[V0], env);
+}
+
 // SetDefDrawEnv
 //
 // Audited 2026-08-06 against the psyz decomp reference (workspace clone,
@@ -922,4 +933,15 @@ TEST_F(PsyqHleTest, PutDrawEnvClampsClipAreaToVramBounds) {
     // get_ce(1989, 1994) clamps to (info.w-1, info.h-1) = (1023, 511).
     EXPECT_EQ(e4 & 0x3FFu, 1023u);
     EXPECT_EQ((e4 >> 10) & 0x3FFu, 511u);
+}
+
+// `DRAWENV* PutDrawEnv(DRAWENV* env)` returns env (sys.c:362, 372). The HLE
+// left V0 untouched, so a caller doing `draw = PutDrawEnv(draw)` picked up
+// whatever the previous call left in the register.
+TEST_F(PsyqHleTest, PutDrawEnvReturnsEnvPointer) {
+    const uint32_t env = 0x6600;
+    ctx.r[A0] = env;
+    ctx.r[V0] = 0xDEADBEEFu;
+    hle_PutDrawEnv(&ctx);
+    EXPECT_EQ(ctx.r[V0], env);
 }

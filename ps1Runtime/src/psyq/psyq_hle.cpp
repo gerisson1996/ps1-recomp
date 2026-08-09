@@ -343,10 +343,14 @@ void hle_SetDefDispEnv(recomp_context *ctx) {
 //     that bit (0x80) is never set -- no game exercises it here.
 //
 void hle_PutDispEnv(recomp_context *ctx) {
+  uint32_t envPtr = ctx->r[A0];
+  // `DISPENV* PutDispEnv(DISPENV* env)` returns env (sys.c:399, 460). Set
+  // before the writeGP1 guard below: the return value does not depend on
+  // whether this runtime has a GP1 sink wired up.
+  ctx->r[V0] = envPtr;
   if (!g_cfg.writeGP1) {
     return;
   }
-  uint32_t envPtr = ctx->r[A0];
   int16_t vx   = static_cast<int16_t>(ctx->mem->read16(envPtr + 0));
   int16_t vy   = static_cast<int16_t>(ctx->mem->read16(envPtr + 2));
   int16_t vw   = static_cast<int16_t>(ctx->mem->read16(envPtr + 4));
@@ -536,10 +540,14 @@ void hle_SetDefDrawEnv(recomp_context *ctx) {
 // now does too, at the tail of the SetDrawEnv2 order established by gap 2.
 // The pre-amendment implementation emitted neither.
 void hle_PutDrawEnv(recomp_context *ctx) {
+  uint32_t envPtr = ctx->r[A0];
+  // `DRAWENV* PutDrawEnv(DRAWENV* env)` returns env (sys.c:362, 372). Set
+  // before the writeGP0 guard below: the return value does not depend on
+  // whether this runtime has a GP0 sink wired up.
+  ctx->r[V0] = envPtr;
   if (!g_cfg.writeGP0) {
     return;
   }
-  uint32_t envPtr = ctx->r[A0];
   int16_t cx  = static_cast<int16_t>(ctx->mem->read16(envPtr + 0));
   int16_t cy  = static_cast<int16_t>(ctx->mem->read16(envPtr + 2));
   int16_t cw  = static_cast<int16_t>(ctx->mem->read16(envPtr + 4));

@@ -154,6 +154,37 @@ TEST_F(PsyqGpuTest, LoadImageZeroSizeIsNoop) {
   EXPECT_TRUE(gp0.empty());
 }
 
+// `int LoadImage(RECT*, u_long*)` tail-returns _addque2's value (sys.c:280-284
+// -- the `return` is on the addque2 call, and there is no early exit), and
+// _addque2's immediate path returns 0 (`move v0,zero` at 0x80042148 in the
+// Crash binary; LoadImage at 0x800404D0-D8 restores RA and returns straight
+// after the jalr). The HLE left V0 untouched, so callers saw whatever the
+// previous HLE happened to leave in it.
+TEST_F(PsyqGpuTest, LoadImageReturnsZero) {
+  uint32_t rectP = 0x80100000u;
+  uint32_t srcP  = 0x80100100u;
+  writeRect(rectP, 0, 0, 2, 1);
+  mem.write32(srcP, 0xABCD1234u);
+
+  ctx.r[A0] = rectP;
+  ctx.r[A1] = srcP;
+  ctx.r[V0] = 0xDEADBEEFu; // stale value from a previous call
+  hle_libgpu_LoadImage(&ctx);
+  EXPECT_EQ(ctx.r[V0], 0u);
+}
+
+// The source has no empty-rect early exit at all, so the zero-size shortcut
+// this HLE takes must still leave the same return value behind.
+TEST_F(PsyqGpuTest, LoadImageReturnsZeroOnZeroSizeRect) {
+  uint32_t rectP = 0x80100000u;
+  writeRect(rectP, 0, 0, 0, 0);
+  ctx.r[A0] = rectP;
+  ctx.r[A1] = 0x80100100u;
+  ctx.r[V0] = 0xDEADBEEFu;
+  hle_libgpu_LoadImage(&ctx);
+  EXPECT_EQ(ctx.r[V0], 0u);
+}
+
 // _dws is the symbol actually dispatched 1458x/run (LoadImage itself is
 // never dispatched by name); exercise it through the registry rather than
 // trusting the delegation in psyq_libgpu.cpp is wired correctly.
