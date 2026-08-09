@@ -474,7 +474,9 @@ TEST_F(PsyqGpuTest, GetClutYOccupiesBits6Through14) {
 // its arguments into the two GP0 words of the DR_MODE primitive.  The
 // pre-2026-07 implementation wrote fixed 0xE1000000 / 0xE2000000
 // placeholders, which forced texpage 0 on every textured primitive the game
-// queued -- 456720 GP0(0x7C) sprites per 15s run, measured 2026-07-27.
+// queued -- ~229000 GP0(0x7C) sprites per 15s run (remeasured 2026-08-09;
+// the 456720 first recorded here was the same figure doubled by the
+// publish-twice bug in GPU::publishMetrics(), fixed in eb15d52).
 // Texpage 0 points at VRAM (0,0), where the framebuffer band lives, instead
 // of the loaded texture pages at (512..1023, 384). Those pages do hold real
 // data (7944 distinct colours), so this is a wrong-address bug, not missing
