@@ -146,14 +146,27 @@ void EMU_UMultiply(uint32_t a, uint32_t b) noexcept {
   ctx->lo = static_cast<uint32_t>(result);
   ctx->hi = static_cast<uint32_t>(result >> 32);
 }
+// R3000A `div` raises no exception on a division error; it writes fixed
+// garbage instead. psx-spx tabulates every case (docs/cpuspecifications.md:
+// 363-369, "The hardware DOES NOT generate exceptions on divide overflows"):
+//   div  0..+7FFFFFFFh   0   -->  HI = Rs, LO = -1
+//   div  -80000000h..-1  0   -->  HI = Rs, LO = +1
+//   div  -80000000h     -1   -->  HI = 0,  LO = -80000000h
+// Both special cases have to be branches rather than C++ division: INT32_MIN /
+// -1 is signed-overflow UB and raises SIGFPE on x86, and the zero-divisor sign
+// split cannot come out of a division that never runs. The previous code had
+// only the zero branch and returned LO = -1 from it regardless of sign.
 void EMU_SDivide(int32_t a, int32_t b) noexcept {
   recomp_context *ctx = emu_ctx();
-  if (b) {
+  if (b == 0) {
+    ctx->hi = static_cast<uint32_t>(a);
+    ctx->lo = a < 0 ? 1u : 0xFFFFFFFFu;
+  } else if (a == INT32_MIN && b == -1) {
+    ctx->hi = 0;
+    ctx->lo = static_cast<uint32_t>(INT32_MIN);
+  } else {
     ctx->lo = static_cast<uint32_t>(a / b);
     ctx->hi = static_cast<uint32_t>(a % b);
-  } else {
-    ctx->lo = 0xFFFFFFFFu;
-    ctx->hi = static_cast<uint32_t>(a);
   }
 }
 void EMU_UDivide(uint32_t a, uint32_t b) noexcept {
