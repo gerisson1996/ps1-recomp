@@ -170,8 +170,9 @@ void hle_libgpu_SetDispMask(recomp_context *ctx) {
 //     values back into the CALLER's RECT. We do not write back, so a game
 //     passing an oversized rect keeps its original values.
 //   * sys.c:756-758 returns -1 when there is nothing to write. We return early
-//     and hle_libgpu__dws forces V0=0, so an empty rect reports success.
-//     LoadImage's return value is what _addque2 hands back to the game.
+//     with V0=0, so an empty rect reports success. Note this deviation is
+//     about _dws's OWN return; LoadImage never propagates it either way,
+//     because it returns what _addque2 hands back (0) -- see below.
 // Neither is exercised by Crash's 1458 uploads (all in-range, none empty), so
 // changing them now would be an unmeasured behaviour change on the one path
 // that currently renders. Revisit if a game depends on either.

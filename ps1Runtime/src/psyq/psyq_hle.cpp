@@ -210,13 +210,19 @@ void hle_DrawOTag(recomp_context *ctx) {
 //     +2  disp.y   (int16)  display area Y in VRAM
 //     +4  disp.w   (int16)  display width
 //     +6  disp.h   (int16)  display height
-//     +8  screen.x (int16)  (unused / screen clip)
-//     +10 screen.y (int16)
-//     +12 screen.w (int16)
-//     +14 screen.h (int16)
+//     +8  screen.x (int16)  screen display range -- NOT unused: PutDispEnv
+//     +10 screen.y (int16)  builds GP1(06)/(07) from these four fields, and
+//     +12 screen.w (int16)  substitutes its own defaults (2560 / 240) when
+//     +14 screen.h (int16)  w/h are zero (sys.c:415-418)
 //     +16 isinter  (uint8)  interlace enable
 //     +17 isrgb24  (uint8)  24bpp enable
 //     +18 pad[2]
+//
+// Audited 2026-08-09 against the psyz decomp reference (workspace clone,
+// PS1Recomp-workspace/psyz/decomp/src/libgpu/ext.c:72-86): all four `screen`
+// fields are set to 0, `isrgb24`/`isinter`/`pad1`/`pad0` to 0, and `env` is
+// returned. See the note in the body on why seeding `screen` with w/h was
+// wrong.
 //
 namespace {
 struct DispEnv {
