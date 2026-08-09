@@ -460,6 +460,19 @@ void hle_SetDefDrawEnv(recomp_context *ctx) {
   ctx->mem->write8(envPtr + 22, 1); // dtd
   // dfe = video_mode ? h <= 288 : h <= 256 (ext.c:60-64)
   ctx->mem->write8(envPtr + 23, h <= (pal ? 288 : 256) ? 1 : 0);
+  // isbg (+24) and the background colour r0/g0/b0 (+25..+27) close out the
+  // struct: ext.c:56-58 sets `env->r0 = 0; env->g0 = 0; env->b0 = 0;` and
+  // ext.c:68 sets `env->isbg = 0`. Offsets from the DRAWENV layout
+  // (psyz/include/libgpu.h:565-575: 0x18 isbg, 0x19 r0, g0, b0), which is
+  // the same layout this function's tpage/dtd/dfe writes above already
+  // follow. Without these four bytes a stack-allocated DRAWENV keeps
+  // whatever garbage was on the stack, so PutDrawEnv's isbg auto-clear tail
+  // (sys.c:576-619) would fire on an uninitialised flag and paint an
+  // uninitialised colour.
+  ctx->mem->write8(envPtr + 24, 0); // isbg
+  ctx->mem->write8(envPtr + 25, 0); // r0
+  ctx->mem->write8(envPtr + 26, 0); // g0
+  ctx->mem->write8(envPtr + 27, 0); // b0
 
   ctx->r[V0] = envPtr;
 }
