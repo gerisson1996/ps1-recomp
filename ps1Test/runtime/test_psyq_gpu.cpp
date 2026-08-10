@@ -566,7 +566,8 @@ TEST_F(PsyqGpuTest, SetDrawModeEncodesTextureWindowRectIntoGp0Word) {
 // different HLE. Encoding confirmed against the psyz decomp reference
 // (workspace clone, PS1Recomp-workspace/psyz/): GetTPage forwards directly
 // to the getTPage() macro (decomp/src/libgpu/prim.c:5-6 -- `return
-// getTPage(tp, abr, x, y);`), defined at psyz/include/libgpu.h:183-185:
+// getTPage(tp, abr, x, y);`), defined at
+// chrono-cross-decomp/include/psyq/libgpu.h:262-264:
 //   #define getTPage(tp, abr, x, y) \
 //       ((((tp) & 0x3) << 7) | (((abr) & 0x3) << 5) | (((y) & 0x100) >> 4) | \
 //        (((x) & 0x3ff) >> 6) | (((y) & 0x200) << 2))
@@ -662,7 +663,8 @@ TEST_F(PsyqGpuTest, GetTPageEncodesYBit8AndBit11FromSource) {
 // sys.c:628-631, confirmed applicable to this target in the SetDrawMode
 // audit above):
 //   (dtd ? 0xE1000200 : 0xE1000000) | (dfe ? 0x400 : 0) | (tpage & 0x9FF)
-// DRAWENV's field layout (psyz/include/libgpu.h:565-575) confirms dfe lives
+// DRAWENV's field layout (chrono-cross-decomp/include/psyq/libgpu.h:361-371)
+// confirms dfe lives
 // at +0x17 (offset 23, right after dtd at +0x16/offset 22) -- both already
 // documented in this file's SetDefDrawEnv comment.
 //

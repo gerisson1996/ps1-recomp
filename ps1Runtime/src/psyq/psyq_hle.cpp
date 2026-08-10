@@ -473,7 +473,8 @@ void hle_SetDefDrawEnv(recomp_context *ctx) {
   // isbg (+24) and the background colour r0/g0/b0 (+25..+27) close out the
   // struct: ext.c:56-58 sets `env->r0 = 0; env->g0 = 0; env->b0 = 0;` and
   // ext.c:68 sets `env->isbg = 0`. Offsets from the DRAWENV layout
-  // (psyz/include/libgpu.h:565-575: 0x18 isbg, 0x19 r0, g0, b0), which is
+  // (chrono-cross-decomp/include/psyq/libgpu.h:361-371: isbg at :368 (+24),
+  // r0/g0/b0 at :369 (+25..+27)), which is
   // the same layout this function's tpage/dtd/dfe writes above already
   // follow. Without these four bytes a stack-allocated DRAWENV keeps
   // whatever garbage was on the stack, so PutDrawEnv's isbg auto-clear tail
@@ -511,7 +512,7 @@ void hle_SetDefDrawEnv(recomp_context *ctx) {
 // bits 9-10 are exclusively Dither/Draw-to-display-area, supplied by
 // dtd/dfe -- never by the raw tpage value -- so 0x7FF let stray high bits of
 // env->tpage leak into those flags, and env->dfe (DRAWENV +0x17, offset 23;
-// psyz/include/libgpu.h:565-575) was never read at all.
+// chrono-cross-decomp/include/psyq/libgpu.h:361-371) was never read at all.
 //
 // Amended 2026-08-07 (Task 4b, gap 1/3) against the same reference:
 // get_cs/get_ce (sys.c:634-651, retail branch) additionally CLAMP the

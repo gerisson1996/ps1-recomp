@@ -726,8 +726,9 @@ TEST_F(PsyqHleTest, SetDefDrawEnvWritesClipAndOffset) {
 
 // ext.c:56-58 and ext.c:68 also zero the last four bytes of the struct:
 // `env->r0 = 0; env->g0 = 0; env->b0 = 0;` and `env->isbg = 0`. Offsets from
-// the DRAWENV layout (psyz/include/libgpu.h:565-575 -- 0x18 isbg, 0x19..0x1B
-// r0/g0/b0), the same layout the tpage/dtd/dfe assertions above follow. The
+// the DRAWENV layout (chrono-cross-decomp/include/psyq/libgpu.h:361-371 --
+// isbg at :368 (+24), r0/g0/b0 at :369 (+25..+27)), the same layout the
+// tpage/dtd/dfe assertions above follow. The
 // implementation wrote +0..+23 and stopped, so a stack-allocated DRAWENV kept
 // stack garbage in the auto-clear flag and its background colour. Poison
 // first -- Memory starts zeroed, so an unpoisoned struct would pass either
