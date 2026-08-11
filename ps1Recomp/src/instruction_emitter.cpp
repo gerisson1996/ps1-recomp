@@ -693,6 +693,35 @@ std::string InstructionEmitter::emitFunction(const RecompFunction &func) const {
         result += yieldCode;
         result += fmt::format("    {}\n", code);
       }
+      // A delay slot can also be somebody else's branch target. It is emitted
+      // inline above (before the transfer), and the main loop is about to skip
+      // its natural position -- which would take its label with it, leaving
+      // `goto L_<ds>` with no definition anywhere. The post-pass then turns
+      // that into a dispatch to an address inside this very function, and the
+      // runtime can only fail on it.
+      //
+      // Measured case: Crash SCUS-94900 func_8003A144, where 0x8003A264 is the
+      // delay slot of the branch at 0x8003A260 *and* the target of branches at
+      // 0x8003A1E0 and 0x8003A258.
+      //
+      // So re-emit it at its natural position, labelled, for control arriving
+      // from elsewhere. The fall-through path already ran it inline, so it
+      // jumps over the copy.
+      const bool dsIsBranchTarget =
+          (i + 1) < labelTargets.size() && labelTargets[i + 1];
+      if (dsIsBranchTarget) {
+        const uint32_t dsAddr = addr + 4;
+        const bool guardFallThrough = inst.isBranch();
+        const std::string done = fmt::format("L_dsdone_{:08X}", dsAddr);
+        if (guardFallThrough)
+          result += fmt::format("    goto {};\n", done);
+        result += fmt::format("{}:\n", label(dsAddr));
+        result += fmt::format("    {} // delay slot, also a branch target\n",
+                              delayCode);
+        if (guardFallThrough)
+          result += fmt::format("{}: ;\n", done);
+      }
+
       ++i; // Skip delay slot instruction
     } else {
       result += fmt::format("    {}\n", code);

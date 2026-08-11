@@ -38,6 +38,7 @@ add_executable(ps1Recomp_tests
     recompiler/test_overlay_handler.cpp
     recompiler/test_hle_emission.cpp
     recompiler/test_dispatch_emitter.cpp
+    recompiler/test_forward_branch.cpp
 )
 
 target_link_libraries(ps1Recomp_tests
