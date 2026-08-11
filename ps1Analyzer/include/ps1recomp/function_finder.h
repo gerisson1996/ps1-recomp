@@ -134,6 +134,8 @@ bool writesRegister(uint32_t instr, uint32_t reg);
 uint32_t refineFunctionEnd(const std::vector<uint32_t> &words,
                            uint32_t startAddr, uint32_t maxEndAddr);
 
+
+
 // Function Detection Source
 
 enum class FunctionSource {
@@ -156,6 +158,20 @@ struct FunctionInfo {
     return address < other.address;
   }
 };
+
+/// Shrink any function that extends into the next one.
+///
+/// Sizes arrive from several places -- the ELF symbol table, the gap to the
+/// next detected entry, `--add-func` on the command line -- and the later
+/// sources do not revisit the earlier ones. So adding an entry point inside an
+/// already-sized function leaves that function's extent untouched, and the
+/// overlapping bytes get emitted twice, under two different function names and
+/// two sets of labels. Every `--add-func` used to work around weak detection
+/// created one of these.
+///
+/// Expects `funcs` sorted by address; sorts it if not. Leaves the last
+/// function alone (nothing follows it to overlap).
+void clampOverlappingSizes(std::vector<FunctionInfo> &funcs);
 
 // FunctionFinder
 

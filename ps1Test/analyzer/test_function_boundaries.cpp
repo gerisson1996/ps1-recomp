@@ -141,3 +141,91 @@ TEST(WritesRegister, ClassifiesTheFormsBoundaryDetectionRelieson) {
 }
 
 } // namespace
+
+// Sobreposicao de funcoes.
+//
+// Tamanhos vem de fontes que nao se revisitam: simbolo do ELF, distancia ate a
+// proxima entrada, e `--add-func` depois de tudo. Adicionar uma entrada dentro
+// de uma funcao ja dimensionada deixava a que engloba com o tamanho antigo, e
+// os mesmos bytes saiam duas vezes no arquivo gerado, sob dois nomes.
+//
+// Os sete casos abaixo sao os medidos em configs/crash_recomp.toml -- um para
+// cada `--add-func` que tools/regen_crash.sh acumulou para contornar a
+// deteccao fraca. Cada workaround criou uma sobreposicao.
+
+namespace {
+
+FunctionInfo fn(uint32_t addr, uint32_t size, const char *name) {
+  FunctionInfo f;
+  f.address = addr;
+  f.size = size;
+  f.name = name;
+  f.source = FunctionSource::JALTarget;
+  f.isLeaf = false;
+  return f;
+}
+
+} // namespace
+
+TEST(ClampOverlappingSizes, ShrinksTheContainerToTheNextEntry) {
+  // O par medido: func_8004636C (1716) engloba func_added_800466A0 (896);
+  // as duas terminavam em 0x80046A20.
+  std::vector<FunctionInfo> funcs{
+      fn(0x8004636Cu, 1716, "func_8004636C"),
+      fn(0x800466A0u, 896, "func_added_800466A0"),
+  };
+  clampOverlappingSizes(funcs);
+  EXPECT_EQ(funcs[0].size, 0x800466A0u - 0x8004636Cu)
+      << "a funcao que engloba tem de parar onde a proxima comeca";
+  EXPECT_EQ(funcs[1].size, 896u) << "a ultima nao tem o que sobrepor";
+}
+
+TEST(ClampOverlappingSizes, FixesEverySevenMeasuredPairs) {
+  // Os sete pares reais de configs/crash_recomp.toml.
+  std::vector<FunctionInfo> funcs{
+      fn(0x80016A6Cu, 680, "func_80016A6C"),  fn(0x80016C18u, 4, "add1"),
+      fn(0x8001AAD8u, 452, "func_8001AAD8"),  fn(0x8001AC60u, 4, "add2"),
+      fn(0x800253A0u, 912, "func_800253A0"),  fn(0x80025628u, 4, "add3"),
+      fn(0x8002D384u, 792, "func_8002D384"),  fn(0x8002D638u, 4, "add4"),
+      fn(0x8002E3F8u, 1236, "func_8002E3F8"), fn(0x8002E8A4u, 4, "add5"),
+      fn(0x800342D8u, 588, "func_800342D8"),  fn(0x80034504u, 4, "add6"),
+      fn(0x8004636Cu, 1716, "func_8004636C"), fn(0x800466A0u, 4, "add7"),
+  };
+  clampOverlappingSizes(funcs);
+  for (size_t i = 0; i + 1 < funcs.size(); ++i) {
+    EXPECT_LE(funcs[i].address + funcs[i].size, funcs[i + 1].address)
+        << funcs[i].name << " ainda alcanca " << funcs[i + 1].name;
+  }
+}
+
+TEST(ClampOverlappingSizes, LeavesNonOverlappingSizesAlone) {
+  std::vector<FunctionInfo> funcs{
+      fn(0x80010000u, 16, "a"), // termina exatamente onde b comeca
+      fn(0x80010010u, 8, "b"),  // deixa uma folga antes de c
+      fn(0x80010100u, 32, "c"),
+  };
+  const auto before = funcs;
+  clampOverlappingSizes(funcs);
+  for (size_t i = 0; i < funcs.size(); ++i)
+    EXPECT_EQ(funcs[i].size, before[i].size) << funcs[i].name;
+}
+
+TEST(ClampOverlappingSizes, SortsWhenTheInputIsOutOfOrder) {
+  std::vector<FunctionInfo> funcs{
+      fn(0x800466A0u, 896, "depois"),
+      fn(0x8004636Cu, 1716, "antes"),
+  };
+  clampOverlappingSizes(funcs);
+  ASSERT_EQ(funcs[0].name, "antes");
+  EXPECT_EQ(funcs[0].size, 0x800466A0u - 0x8004636Cu);
+}
+
+TEST(ClampOverlappingSizes, ToleratesDuplicateAddresses) {
+  std::vector<FunctionInfo> funcs{
+      fn(0x80010000u, 64, "a"),
+      fn(0x80010000u, 64, "duplicata"),
+      fn(0x80010080u, 16, "b"),
+  };
+  clampOverlappingSizes(funcs); // nao pode dividir por zero nem zerar tudo
+  EXPECT_EQ(funcs[2].size, 16u);
+}

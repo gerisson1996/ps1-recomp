@@ -93,6 +93,21 @@ uint32_t refineFunctionEnd(const std::vector<uint32_t> &words,
   return maxEndAddr;
 }
 
+void clampOverlappingSizes(std::vector<FunctionInfo> &funcs) {
+  if (funcs.size() < 2)
+    return;
+  if (!std::is_sorted(funcs.begin(), funcs.end()))
+    std::sort(funcs.begin(), funcs.end());
+
+  for (size_t i = 0; i + 1 < funcs.size(); ++i) {
+    if (funcs[i + 1].address <= funcs[i].address)
+      continue; // duplicate address -- not this function's problem
+    const uint32_t room = funcs[i + 1].address - funcs[i].address;
+    if (funcs[i].size > room)
+      funcs[i].size = room;
+  }
+}
+
 // Main Entry Point
 
 void FunctionFinder::findFunctions(const ElfParser& elf) {
@@ -224,6 +239,12 @@ void FunctionFinder::computeBoundaries(const Section& text) {
             }
         }
     }
+
+    // No function may reach into the next one. Sizes set by earlier passes
+    // (ELF symbols) and by `--add-func` after the fact never revisit each
+    // other, so a containing function keeps its old extent and the same
+    // bytes get emitted twice, under two names.
+    clampOverlappingSizes(m_functions);
 
     // Determine leaf functions: scan each function for JAL/JALR instructions
     for (auto& func : m_functions) {
