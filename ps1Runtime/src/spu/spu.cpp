@@ -438,18 +438,21 @@ void SPU::advanceAdpcmBlock(Voice &v) {
     v.currentAddr = 0;
   }
 
-  if (flags & 0x01) { // End flag
+  if (flags & 0x01) { // Loop End: set ENDX and jump, regardless of bit 1.
+    // soundprocessingunitspu.md:130,135-141: Code 1 (End+Mute, bit1=0) and
+    // Code 3 (End+Repeat, bit1=1) both "jump to Loop-address, set ENDX
+    // flag"; only Code 1 additionally forces Release with envelope zeroed.
     v.endFlag = true;
-    endxFlags_ |= (1 << (&v - voices_)); // set ENDX bit
+    endxFlags_ |= (1u << (&v - voices_)); // set ENDX bit
+    v.currentAddr = static_cast<uint32_t>(v.repeatAddr) * 8;
+    v.loopFlag = true;
 
-    if (flags & 0x02) { // Loop flag -- jump to repeat address
-      v.currentAddr = static_cast<uint32_t>(v.repeatAddr) * 8;
-      v.loopFlag = true;
-    } else {
-      // Voice stops
-      v.adsrPhase = AdsrPhase::Off;
+    if (!(flags & 0x02)) {
+      // Code 1 = End+Mute: force Release phase, envelope to zero.
+      v.adsrPhase = AdsrPhase::Release;
       v.adsrVolume = 0;
     }
+    // Code 3 (flags & 0x02) = End+Repeat: jump only, envelope untouched.
   }
 }
 
@@ -474,6 +477,12 @@ SPU::decodeAdpcmBlockForTest(const uint8_t block[ADPCM_BLOCK_SIZE],
                        ADPCM_FILTER_NEG[filter], prevSample1, prevSample2,
                        out.data());
   return out;
+}
+
+SPU::VoiceDebugState SPU::debugVoiceState(uint32_t voiceIdx) const {
+  std::lock_guard<std::mutex> lock(mutex_);
+  const Voice &v = voices_[voiceIdx];
+  return VoiceDebugState{v.currentAddr, v.repeatAddr, v.loopFlag, v.endFlag};
 }
 
 // ADSR

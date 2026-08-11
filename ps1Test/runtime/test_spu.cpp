@@ -147,6 +147,104 @@ TEST_F(SpuAdpcmTest, MultipleBlocksDontCrash) {
   EXPECT_TRUE(true);
 }
 
+// ADPCM Loop/End Flag Tests
+//
+// Flag bits and the Code0-3 combinations are documented at
+// soundprocessingunitspu.md:128-141. Cross-checked against
+// CrashBandicoot-Launcher/RecompOne.Runtime/Hardware/Spu.cs:509-525
+// (DecodeBlock), which unconditionally jumps CurAddr to RepeatAddr on the
+// End flag (bit 0), regardless of the Repeat bit (bit 1); bit 1 only
+// decides whether the envelope is also forced to Release/zero.
+//
+// A single generateSamples(buf, 1) call is enough to trigger exactly one
+// advanceAdpcmBlock(): Key On forces decodedIndex to ADPCM_SAMPLES_PER_BLOCK,
+// and pitch=0x1000 (1.0) advances decodedIndex by exactly one per output
+// sample.
+
+class SpuAdpcmLoopFlagTest : public ::testing::Test {
+protected:
+  SPU spu;
+  void SetUp() override { spu.reset(); }
+
+  void writeBlockHeader(uint32_t byteAddr, uint8_t shiftFilter,
+                        uint8_t flags) {
+    uint8_t *ram = spu.soundRamPtr();
+    ram[byteAddr] = shiftFilter;
+    ram[byteAddr + 1] = flags;
+    std::memset(ram + byteAddr + 2, 0, 14);
+  }
+};
+
+TEST_F(SpuAdpcmLoopFlagTest, Code0NormalAdvancesToNextBlockOnly) {
+  writeBlockHeader(0, 0x00, 0x00); // filter=0,shift=0, flags=Normal
+
+  spu.writeRegister(0x1F801C06, 0);      // start addr = 0
+  spu.writeRegister(0x1F801C04, 0x1000); // pitch = 1.0
+  spu.writeRegister(0x1F801D88, 0x0001); // key on voice 0
+
+  int16_t buffer[2] = {};
+  spu.generateSamples(buffer, 1);
+
+  auto state = spu.debugVoiceState(0);
+  EXPECT_EQ(state.currentAddr, 16u); // advanced by one 16-byte block only
+  EXPECT_FALSE(state.endFlag);
+  EXPECT_FALSE(state.loopFlag);
+}
+
+TEST_F(SpuAdpcmLoopFlagTest, LoopStartBitLatchesCurrentBlockAddress) {
+  // Voice starts at block address 16 (startAddr=2, in 8-byte units).
+  writeBlockHeader(16, 0x00, 0x04); // flags: Loop Start
+
+  spu.writeRegister(0x1F801C06, 2); // start addr = 2 (=> byte addr 16)
+  spu.writeRegister(0x1F801C04, 0x1000);
+  spu.writeRegister(0x1F801D88, 0x0001);
+
+  int16_t buffer[2] = {};
+  spu.generateSamples(buffer, 1);
+
+  // soundprocessingunitspu.md:100-102: "If the hardware finds an ADPCM
+  // header with Loop-Start-Bit, then it copies the current address to the
+  // repeat address register" -- current block's own address (16 bytes =
+  // 2 in 8-byte units), not the next block.
+  EXPECT_EQ(spu.readRegister(0x1F801C0E), 2);
+}
+
+TEST_F(SpuAdpcmLoopFlagTest, Code1EndMuteJumpsToRepeatAddressAndReleases) {
+  writeBlockHeader(0, 0x00, 0x01); // flags: Loop End, bit1=0 => Code 1
+
+  spu.writeRegister(0x1F801C06, 0);      // start addr = 0
+  spu.writeRegister(0x1F801C0E, 5);      // repeat addr = 5 (=> byte addr 40)
+  spu.writeRegister(0x1F801C04, 0x1000); // pitch = 1.0
+  spu.writeRegister(0x1F801D88, 0x0001); // key on voice 0
+
+  int16_t buffer[2] = {};
+  spu.generateSamples(buffer, 1);
+
+  auto state = spu.debugVoiceState(0);
+  EXPECT_EQ(state.currentAddr, 40u); // jumped to repeatAddr*8, not addr+16
+  EXPECT_TRUE(state.endFlag);
+  EXPECT_TRUE(state.loopFlag);
+  EXPECT_EQ(spu.readRegister(0x1F801D9C) & 0x1, 1); // ENDX bit 0 set
+}
+
+TEST_F(SpuAdpcmLoopFlagTest, Code3EndRepeatJumpsToRepeatAddress) {
+  writeBlockHeader(0, 0x00, 0x03); // flags: Loop End + Loop Repeat => Code 3
+
+  spu.writeRegister(0x1F801C06, 0);
+  spu.writeRegister(0x1F801C0E, 5); // repeat addr = 5 (=> byte addr 40)
+  spu.writeRegister(0x1F801C04, 0x1000);
+  spu.writeRegister(0x1F801D88, 0x0001);
+
+  int16_t buffer[2] = {};
+  spu.generateSamples(buffer, 1);
+
+  auto state = spu.debugVoiceState(0);
+  EXPECT_EQ(state.currentAddr, 40u);
+  EXPECT_TRUE(state.endFlag);
+  EXPECT_TRUE(state.loopFlag);
+  EXPECT_EQ(spu.readRegister(0x1F801D9C) & 0x1, 1);
+}
+
 // ADSR Envelope Tests
 
 class SpuAdsrTest : public ::testing::Test {
