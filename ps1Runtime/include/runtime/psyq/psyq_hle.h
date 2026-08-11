@@ -57,6 +57,21 @@ void configure(const HleConfig &cfg);
 /// stubs that need writeGP0/writeGP1 callbacks without re-binding them.
 const HleConfig &getConfig();
 
+/**
+ * @brief Advance the game's root-counter tick word by `vblanks` VBlanks' worth.
+ *
+ * Models the root-counter interrupt callback this runtime never fires: on
+ * hardware the game arms `SetRCnt` and registers a handler that increments a
+ * word in its own BSS, and that word is the frame delta its physics and waits
+ * are written against.  Address and rate come from `psyq_state()`
+ * (`rcntTickAddr` / `rcntTicksPerVBlank`, populated from the game TOML's
+ * `[timing]` block); when either is zero this is a no-op.
+ *
+ * Runs on the game thread, from `hle_VSync`, so it serialises with the game's
+ * own writes to the same word.
+ */
+void applyRootCounterTicks(recomp_context *ctx, uint32_t vblanks);
+
 // PsyQ SDK HLE implementations
 
 /// VSync(n) -- wait for n vertical blanks then return the total VBlank count.

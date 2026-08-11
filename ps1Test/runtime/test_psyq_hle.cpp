@@ -946,3 +946,86 @@ TEST_F(PsyqHleTest, PutDrawEnvReturnsEnvPointer) {
     hle_PutDrawEnv(&ctx);
     EXPECT_EQ(ctx.r[V0], env);
 }
+
+// Root-counter tick accumulator
+//
+// Games that drive their frame delta off a root counter arm `SetRCnt` and
+// register an interrupt handler that increments a word in their own BSS.
+// This runtime models interrupts cooperatively and never fires that handler,
+// so without `applyRootCounterTicks` the word stays frozen and every
+// time-driven wait in the game crawls.
+//
+// Crash Bandicoot (SCUS-94900) is the measured case: `0x800165A8` opens event
+// class 0xF2000002 (Root Counter 2) with handler `0x80034504` -- a leaf that
+// does `*(0x80034520) += 1` -- and arms the counter with target 0x1000. At
+// sysclk/8 (4233600 Hz) that fires 4233600/4096 = ~1033 times a second, i.e.
+// ~17 per VBlank. Advancing 1 per VBlank instead ran the game ~18x too slow:
+// `frames_elapsed` measured 69 in 40 s versus 1261 with the correct rate.
+
+TEST_F(PsyqHleTest, RootCounterTicksDisabledByDefault) {
+    const uint32_t addr = 0x80034520u;
+    mem.write32(addr, 0);
+    applyRootCounterTicks(&ctx, 10);
+    EXPECT_EQ(mem.read32(addr), 0u)
+        << "no [timing] config means the word must not be touched";
+}
+
+TEST_F(PsyqHleTest, RootCounterTicksAddRatePerVBlank) {
+    const uint32_t addr = 0x80034520u;
+    psyq_state().rcntTickAddr = addr;
+    psyq_state().rcntTicksPerVBlank = 17;
+    mem.write32(addr, 0);
+
+    applyRootCounterTicks(&ctx, 1);
+    EXPECT_EQ(mem.read32(addr), 17u);
+
+    applyRootCounterTicks(&ctx, 3);
+    EXPECT_EQ(mem.read32(addr), 17u + 51u) << "must accumulate, not overwrite";
+}
+
+TEST_F(PsyqHleTest, RootCounterTicksPreserveExistingValue) {
+    // The game writes this word itself on some paths (Crash: `+= 34` at
+    // 0x80017180, and a timer read at 0x800171FC), so the accumulator must
+    // build on whatever is already there rather than assume it owns the slot.
+    const uint32_t addr = 0x80034520u;
+    psyq_state().rcntTickAddr = addr;
+    psyq_state().rcntTicksPerVBlank = 17;
+    mem.write32(addr, 1000);
+    applyRootCounterTicks(&ctx, 2);
+    EXPECT_EQ(mem.read32(addr), 1034u);
+}
+
+TEST_F(PsyqHleTest, RootCounterTicksZeroVBlanksIsNoop) {
+    const uint32_t addr = 0x80034520u;
+    psyq_state().rcntTickAddr = addr;
+    psyq_state().rcntTicksPerVBlank = 17;
+    mem.write32(addr, 500);
+    applyRootCounterTicks(&ctx, 0);
+    EXPECT_EQ(mem.read32(addr), 500u);
+}
+
+TEST_F(PsyqHleTest, RootCounterTicksRateZeroIsNoop) {
+    const uint32_t addr = 0x80034520u;
+    psyq_state().rcntTickAddr = addr;
+    psyq_state().rcntTicksPerVBlank = 0;
+    mem.write32(addr, 500);
+    applyRootCounterTicks(&ctx, 5);
+    EXPECT_EQ(mem.read32(addr), 500u);
+}
+
+TEST_F(PsyqHleTest, VSyncAdvancesRootCounterTicksByVBlanksWaited) {
+    // The real path: hle_VSync waits for N VBlanks and must advance the tick
+    // word by exactly the number it actually observed, not by a fixed amount.
+    const uint32_t addr = 0x80034520u;
+    psyq_state().rcntTickAddr = addr;
+    psyq_state().rcntTicksPerVBlank = 17;
+    mem.write32(addr, 0);
+
+    const uint32_t start = psyq_state().vsyncCounter.load();
+    ctx.r[A0] = 3;
+    hle_VSync(&ctx);
+    const uint32_t waited = psyq_state().vsyncCounter.load() - start;
+
+    ASSERT_GE(waited, 3u);
+    EXPECT_EQ(mem.read32(addr), 17u * waited);
+}

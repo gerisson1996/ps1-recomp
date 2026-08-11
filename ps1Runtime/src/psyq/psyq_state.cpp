@@ -18,6 +18,8 @@ void PsyqState::reset() {
   for (auto &cb : dmaCallback)  cb = 0;
   callbacksEnabled = true;
   drawSync = GpuDrawSync{};
+  rcntTickAddr = 0;
+  rcntTicksPerVBlank = 0;
 }
 
 PsyqState &psyq_state() {

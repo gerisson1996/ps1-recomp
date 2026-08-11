@@ -24,6 +24,17 @@ static inline void drainOnce() {
     g_cfg.drainCallbacks();
 }
 
+void applyRootCounterTicks(recomp_context *ctx, uint32_t vblanks) {
+  auto &st = psyq_state();
+  if (st.rcntTickAddr == 0 || st.rcntTicksPerVBlank == 0 || vblanks == 0 ||
+      ctx == nullptr || ctx->mem == nullptr)
+    return;
+  const uint32_t current = ctx->mem->read32(st.rcntTickAddr);
+  ctx->mem->write32(st.rcntTickAddr,
+                    current + st.rcntTicksPerVBlank * vblanks);
+  ps1::metrics::count("rcnt.ticks", st.rcntTicksPerVBlank * vblanks);
+}
+
 // VSync
 //
 // PsyQ VSync(n):
@@ -66,7 +77,10 @@ void hle_VSync(recomp_context *ctx) {
     g_cfg.deliverVBlankEvent();
   }
 
-  ctx->r[V0] = counter.load(std::memory_order_acquire);
+  const uint32_t end = counter.load(std::memory_order_acquire);
+  applyRootCounterTicks(ctx, end - start);
+
+  ctx->r[V0] = end;
 }
 
 // DrawSync

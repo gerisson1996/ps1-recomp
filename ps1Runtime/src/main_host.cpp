@@ -514,6 +514,36 @@ int main(int argc, char *argv[]) {
     } catch (const std::exception &) {
       // Optional section -- silent fallback.
     }
+
+    // `[timing]` (TOML, optional): games that drive their frame delta off a
+    // root counter register an IRQ callback that increments a word in their
+    // own BSS.  This runtime models interrupts cooperatively and never fires
+    // it, so the word stays frozen and every time-driven wait crawls.  These
+    // two keys let the VSync HLE advance it at the right rate instead.
+    try {
+      auto cfg = toml::parse(config_path);
+      if (cfg.contains("timing")) {
+        auto &t = toml::find(cfg, "timing");
+        auto readU32 = [&](const char *key) -> uint32_t {
+          if (!t.contains(key))
+            return 0;
+          auto v = toml::find(t, key);
+          if (v.is_string())
+            return std::strtoul(v.as_string().c_str(), nullptr, 0);
+          if (v.is_integer())
+            return static_cast<uint32_t>(v.as_integer());
+          return 0;
+        };
+        auto &st = ps1::psyq::psyq_state();
+        st.rcntTickAddr = readU32("rcnt_tick_addr");
+        st.rcntTicksPerVBlank = readU32("rcnt_ticks_per_vblank");
+        if (st.rcntTickAddr != 0 && st.rcntTicksPerVBlank != 0)
+          fmt::print("[timing] rcnt tick 0x{:08X} += {} per VBlank\n",
+                     st.rcntTickAddr, st.rcntTicksPerVBlank);
+      }
+    } catch (const std::exception &) {
+      // Optional section -- silent fallback.
+    }
   }
   bios.setBssMirrors(cdSyncMirror, cdReadyMirror);
 
