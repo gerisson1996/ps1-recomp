@@ -351,7 +351,13 @@ std::string InstructionEmitter::emitJump(const Instruction &inst,
   case InstrId::JAL: {
     auto target = inst.jumpTarget(pc);
     auto name = defaultFuncName(target);
-    return fmt::format("{}(rdram, ctx);", name);
+    // `jal` writes $ra = PC+8 on hardware. The C++ call returns on its own, so
+    // it is tempting to skip this -- but $ra is data as much as it is control
+    // flow: callees save it to the stack, pass it on, and jump through it. A
+    // stale $ra from some earlier indirect call then travels into memory and
+    // comes back as a garbage pointer. JALR below already does this; JAL did
+    // not, across every one of its call sites.
+    return fmt::format("ctx->r31 = 0x{:08X}; {}(rdram, ctx);", pc + 8, name);
   }
   case InstrId::JR:
     if (inst.rs == 31) {

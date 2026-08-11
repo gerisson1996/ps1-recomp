@@ -61,3 +61,30 @@ TEST(EmitterForwardBranch, CrashFunc8003A144KeepsItsForwardTargetLocal) {
 }
 
 } // namespace
+
+// `jal` grava $ra = PC+8 no hardware. O emissor confiava no retorno do C++ e
+// nao gravava nada, entao qualquer funcao que LEIA $ra como dado -- salvar na
+// pilha, repassar, saltar por ele -- via lixo da ultima chamada indireta.
+//
+// Medido no gerado do Crash antes da correcao: 1523 chamadas diretas, ZERO
+// gravando r31. No build de referencia do mesmo binario: 1591 de 1597.
+// `func_8001B648` e um caso concreto -- faz `MEM_WRITE32(sp+32, ctx->r31)`.
+TEST(EmitterDirectCall, JalWritesReturnAddressBeforeCalling) {
+  RecompFunction f;
+  f.name = "func_test";
+  f.address = 0x80010000u;
+  // jal 0x80020000 ; nop(delay) ; jr $ra ; nop
+  f.instructions = {0x0C008000u, 0x00000000u, 0x03E00008u, 0x00000000u};
+  f.size = f.instructions.size() * 4;
+  f.isLabelTarget.assign(f.instructions.size(), false);
+
+  InstructionEmitter em;
+  const std::string out = em.emitFunction(f);
+
+  const size_t ra = out.find("ctx->r31 = 0x80010008");
+  const size_t call = out.find("func_80020000(rdram, ctx);");
+  ASSERT_NE(call, std::string::npos) << out;
+  ASSERT_NE(ra, std::string::npos)
+      << "jal deve gravar $ra = PC+8 antes de chamar\n" << out;
+  EXPECT_LT(ra, call) << "$ra tem de estar valido quando a callee comeca";
+}
