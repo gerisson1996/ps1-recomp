@@ -8,6 +8,91 @@
 
 namespace ps1recomp {
 
+namespace mips {
+
+bool writesRegister(uint32_t instr, uint32_t reg) {
+  if (reg == 0)
+    return false; // $zero is never really written
+
+  const uint32_t op = getOpcode(instr);
+
+  if (op == OP_SPECIAL) {
+    const uint32_t fn = getFunction(instr);
+    // jr, jalr, mthi, mtlo, mult, multu, div, divu write no GPR rd we track
+    const bool noRdWrite = (fn == 0x08 || fn == 0x09 || fn == 0x11 ||
+                            fn == 0x13 || fn == 0x18 || fn == 0x19 ||
+                            fn == 0x1A || fn == 0x1B);
+    return !noRdWrite && getRd(instr) == reg;
+  }
+  if (isLoad(instr))
+    return getRt(instr) == reg;
+  // ADDI, ADDIU, SLTI, SLTIU, ANDI, ORI, XORI, LUI -- all write rt
+  if (op >= 0x08 && op <= 0x0F)
+    return getRt(instr) == reg;
+  return false;
+}
+
+} // namespace mips
+
+namespace {
+
+/// Does the instruction at `idx` terminate the function?
+///
+/// `jr $ra` always does. For `jr $reg` we walk back to whoever wrote `$reg`:
+/// a load means the target came out of memory -- a jump table or dispatch
+/// through a pointer, both of which stay inside the function -- while anything
+/// else (notably `move $reg, $ra`) means the register carries a return address.
+bool isFunctionEnd(const std::vector<uint32_t> &words, size_t idx) {
+  const uint32_t instr = words[idx];
+  if (!mips::isJR(instr))
+    return false;
+  const uint32_t reg = mips::getRs(instr);
+  if (reg == mips::REG_RA)
+    return true;
+
+  for (size_t k = idx; k-- > 0;) {
+    if (!mips::writesRegister(words[k], reg))
+      continue;
+    return !mips::isLoad(words[k]);
+  }
+  // Nothing in this range wrote it, so it came in from the caller.
+  return true;
+}
+
+} // namespace
+
+uint32_t refineFunctionEnd(const std::vector<uint32_t> &words,
+                           uint32_t startAddr, uint32_t maxEndAddr) {
+  if (words.empty() || maxEndAddr <= startAddr)
+    return maxEndAddr;
+
+  uint32_t reach = startAddr;
+
+  for (size_t i = 0; i < words.size(); ++i) {
+    const uint32_t addr = startAddr + static_cast<uint32_t>(i * 4);
+    if (addr >= maxEndAddr)
+      break;
+    const uint32_t instr = words[i];
+
+    // Track the furthest forward target: while any branch still jumps past
+    // this point, the body continues regardless of terminators in between.
+    if (mips::isBranch(instr) || mips::isJ(instr)) {
+      const uint32_t target = mips::isJ(instr)
+                                  ? mips::jalTarget(addr, instr)
+                                  : mips::branchTarget(addr, instr);
+      if (target > reach && target > startAddr && target < maxEndAddr)
+        reach = target;
+    }
+
+    if (isFunctionEnd(words, i) && addr >= reach) {
+      const uint32_t end = addr + 8; // terminator + its delay slot
+      return end > maxEndAddr ? maxEndAddr : end;
+    }
+  }
+
+  return maxEndAddr;
+}
+
 // Main Entry Point
 
 void FunctionFinder::findFunctions(const ElfParser& elf) {

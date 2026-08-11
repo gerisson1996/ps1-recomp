@@ -11,6 +11,7 @@ add_executable(ps1Analyzer_tests
     analyzer/test_psyq_hash_matching.cpp
     analyzer/test_config_generator.cpp
     analyzer/test_overlay_scanner.cpp
+    analyzer/test_function_boundaries.cpp
 )
 
 target_link_libraries(ps1Analyzer_tests
