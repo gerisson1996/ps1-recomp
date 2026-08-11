@@ -1,15 +1,82 @@
 #include "runtime/spu/spu.h"
+#include <cstring>
 #include <gtest/gtest.h>
 
 using namespace ps1::spu;
 
 // ADPCM Decoding Tests
+//
+// Vectors are hand-worked from the psx-spx SPU-ADPCM decode formula
+// (PS1Recomp-workspace/psx-spx.github.io/docs/cdromformat.md:827-838,
+// coefficient tables at :843-844) applied to the SPU block layout
+// (soundprocessingunitspu.md:116-125). See the derivation notes in
+// .superpowers/sdd/phase-3-crash-jogavel/task-S1-report.md.
 
 class SpuAdpcmTest : public ::testing::Test {
 protected:
   SPU spu;
   void SetUp() override { spu.reset(); }
 };
+
+TEST_F(SpuAdpcmTest, DecodesFullNibbleRangeWithFilterZero) {
+  // header = filter 0, raw shift 12 (=> effective shift 12-12=0). With
+  // filter 0, f0=f1=0 (cdromformat.md:843-844), so per the formula
+  // s = (t<<0) + (old*0+older*0+32)/64 = t + 0 (integer division truncates
+  // 32/64 toward zero) -- i.e. the decoded output is exactly the
+  // sign-extended nibble sequence. This isolates nibble sign-extension from
+  // the prediction filter.
+  uint8_t block[16] = {};
+  block[0] = 0x0C; // filter=0, shift=12
+  block[1] = 0x00; // flags: normal
+
+  // Nibble sequence -8..7 repeated (28 values), covering every 4-bit
+  // pattern including the ones that must sign-extend to negative (8..15).
+  // Packed 2 nibbles/byte, low nibble first (soundprocessingunitspu.md:121:
+  // "LSBs=1st Sample, MSBs=2nd Sample").
+  const uint8_t dataBytes[14] = {0x98, 0xBA, 0xDC, 0xFE, 0x10, 0x32, 0x54,
+                                 0x76, 0x98, 0xBA, 0xDC, 0xFE, 0x10, 0x32};
+  std::memcpy(block + 2, dataBytes, 14);
+
+  auto samples = spu.decodeAdpcmBlockForTest(block, /*prevSample1=*/0,
+                                              /*prevSample2=*/0);
+
+  const int16_t expected[28] = {-8, -7, -6, -5, -4, -3, -2, -1, 0, 1,
+                                2,  3,  4,  5,  6,  7,  -8, -7, -6, -5,
+                                -4, -3, -2, -1, 0,  1,  2,  3};
+  for (int i = 0; i < 28; i++) {
+    EXPECT_EQ(samples[i], expected[i]) << "sample index " << i;
+  }
+}
+
+TEST_F(SpuAdpcmTest, AppliesFilterOneCoefficientsToPrediction) {
+  // Same nibble data as above, but filter=1 (f0=+60, f1=0 per
+  // cdromformat.md:843-844) with raw shift 12 (effective shift 0), so the
+  // IIR prediction term (old*f0 + older*f1 + 32) / 64 is exercised.
+  // Expected values derived by applying cdromformat.md:827-838 verbatim
+  // (integer division truncating toward zero, matching C++ int division):
+  //   s0 = -8 + (0*60+0*0+32)/64            = -8 + 0   = -8
+  //   s1 = -7 + (-8*60+0*0+32)/64           = -7 + (-448/64=-7) = -14
+  //   s2 = -6 + (-14*60+(-8)*0+32)/64       = -6 + (-808/64=-12) = -18
+  //   ... (full 28-sample sequence computed with the same recurrence)
+  uint8_t block[16] = {};
+  block[0] = 0x1C; // filter=1, shift=12 (effective shift 0)
+  block[1] = 0x00;
+
+  const uint8_t dataBytes[14] = {0x98, 0xBA, 0xDC, 0xFE, 0x10, 0x32, 0x54,
+                                 0x76, 0x98, 0xBA, 0xDC, 0xFE, 0x10, 0x32};
+  std::memcpy(block + 2, dataBytes, 14);
+
+  auto samples = spu.decodeAdpcmBlockForTest(block, /*prevSample1=*/0,
+                                              /*prevSample2=*/0);
+
+  const int16_t expected[28] = {-8,  -14, -18, -21, -23, -24, -24, -23,
+                                -21, -18, -14, -9,  -3,  3,   9,   15,
+                                6,   -1,  -6,  -10, -12, -13, -13, -12,
+                                -10, -7,  -4,  0};
+  for (int i = 0; i < 28; i++) {
+    EXPECT_EQ(samples[i], expected[i]) << "sample index " << i;
+  }
+}
 
 TEST_F(SpuAdpcmTest, SilentBlockDecodesZeros) {
   // Set up a silent ADPCM block (all zeros) at address 0

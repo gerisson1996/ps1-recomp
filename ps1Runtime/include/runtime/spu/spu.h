@@ -112,6 +112,15 @@ public:
   // Thread safety for audio callback
   std::mutex &getMutex() { return mutex_; }
 
+  // Test-only hook (ps1Test/runtime/test_spu.cpp): decode a single 16-byte
+  // SPU-ADPCM block in isolation, using the same algorithm as
+  // advanceAdpcmBlock() (see spu.cpp for citations), so decoded PCM output
+  // can be checked against hand-worked values without routing through
+  // pitch/ADSR/mixing.
+  std::array<int16_t, ADPCM_SAMPLES_PER_BLOCK>
+  decodeAdpcmBlockForTest(const uint8_t block[ADPCM_BLOCK_SIZE],
+                          int16_t prevSample1, int16_t prevSample2) const;
+
 private:
   // Voices
   Voice voices_[NUM_VOICES];
