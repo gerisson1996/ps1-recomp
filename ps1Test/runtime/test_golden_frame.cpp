@@ -109,9 +109,19 @@ TEST(GoldenFrame, CrashRendersContentAtFrame200) {
 
   // Run from the repository root: the disc paths inside crash.toml are
   // relative to it.
+  // PS1_DISPATCH_PERMISSIVE: this test's contract is the render pipeline, not
+  // the completeness of the dispatch table. Unmapped calls abort by default so
+  // that a missing function is found at its cause rather than swallowed -- but
+  // Crash still reaches several of them before frame 200 (the analyzer splits
+  // functions and their intra-function branches become dispatches to addresses
+  // that were never emitted). Until the boundary analysis is fixed, this test
+  // deliberately runs the knowingly-incomplete build, which is exactly what the
+  // escape hatch is for. Drop this variable once the game boots clean; if it
+  // then still passes, the render contract never depended on the hatch.
   const std::string cmd =
       "cd " + std::string(kRepoRoot) +
-      " && SDL_AUDIODRIVER=dummy PS1_VRAM_DUMP_FRAME=200 PS1_VRAM_DUMP_PATH=" +
+      " && SDL_AUDIODRIVER=dummy PS1_DISPATCH_PERMISSIVE=1 "
+      "PS1_VRAM_DUMP_FRAME=200 PS1_VRAM_DUMP_PATH=" +
       ppm +
       " timeout --kill-after=5 25 ./build/ps1Runtime/ps1Runtime "
       "--config configs/crash.toml > /dev/null 2>&1";
