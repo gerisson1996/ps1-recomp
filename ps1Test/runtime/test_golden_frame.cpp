@@ -86,7 +86,7 @@ bool exists(const std::string &path) {
 // The golden frame contract for Crash bring-up.  Skipped when the game config
 // or the runtime binary is absent, matching the skip-if-no-rom pattern in
 // ps1Test/pipeline/.
-TEST(GoldenFrame, CrashRendersContentAtFrame200) {
+TEST(GoldenFrame, CrashRendersContentAtFrame400) {
   const std::string config = atRoot("configs/crash.toml");
   const std::string runtime = atRoot("build/ps1Runtime/ps1Runtime");
   if (!exists(config))
@@ -121,7 +121,13 @@ TEST(GoldenFrame, CrashRendersContentAtFrame200) {
   const std::string cmd =
       "cd " + std::string(kRepoRoot) +
       " && SDL_AUDIODRIVER=dummy PS1_DISPATCH_PERMISSIVE=1 "
-      "PS1_VRAM_DUMP_FRAME=200 PS1_VRAM_DUMP_PATH=" +
+      // Frame 400, not 200. The old anchor was tuned to the hand-ported GOOL
+      // VM's boot timeline; since d04dcd7 the game runs its own interpreter and
+      // content arrives later. Measured on the native build: 16 distinct band
+      // colours at frame 200, ~988 by frame 400. The threshold below is
+      // unchanged -- only the anchor moved, so it still separates a real screen
+      // from a cleared one (which scores 4).
+      "PS1_VRAM_DUMP_FRAME=400 PS1_VRAM_DUMP_PATH=" +
       ppm +
       " timeout --kill-after=5 25 ./build/ps1Runtime/ps1Runtime "
       "--config configs/crash.toml > /dev/null 2>&1";
