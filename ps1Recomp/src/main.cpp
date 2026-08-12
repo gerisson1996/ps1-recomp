@@ -23,16 +23,27 @@ using namespace ps1recomp;
 // Jump Table Auto-Detection
 //
 // Detects the canonical MIPS switch table pattern:
-//   LUI   $rbase, hi       ; rbase = upper address
-//   ADDIU $rbase, $rbase, lo ; rbase = table_base
-//   ADDU  $rtbl, $rbase, $ridx  ; rtbl = table_base + index*4
-//   LW    $rtgt, N($rtbl)  ; rtgt = table[index]
-//   JR    $rtgt             ; indirect jump
+//   SLTIU $rchk, $ridx, N     ; bounds check against the entry count
+//   BEQZ  $rchk, default      ; out-of-range -> default case
+//   SLL   $rscale, $ridx, 2   ; scale index to a word offset (delay slot)
+//   LUI   $rbase, hi          ; rbase = upper address
+//   ADDIU $rbase, $rbase, lo  ; rbase = table_base
+//   ADDU  $rtbl, $rbase, $rscale ; rtbl = table_base + index*4
+//   LW    $rtgt, N($rtbl)     ; rtgt = table[index]
+//   JR    $rtgt               ; indirect jump
 //
 // When found, reads the target addresses from the ELF data section
 // and stores them in a JumpTableEntry on the RecompFunction.
 //
+// The entry count comes from the SLTIU/SLTI bounds check when one is present.
+// Without it there is nothing in the code stream that marks where the table
+// ends, so we fall back to a conservative fixed window: a table is only
+// distinguishable from the data that follows it by that bound.
+//
 // Returns a vector of target addresses (empty if pattern not found).
+static constexpr uint32_t kJumpTableFallbackEntries = 64;
+static constexpr uint32_t kJumpTableMaxEntries = 4096;
+
 static std::vector<uint32_t>
 detectJumpTable(const std::vector<uint32_t> &instrs, size_t jr_idx,
                 const ElfParser &parser) {
@@ -59,49 +70,88 @@ detectJumpTable(const std::vector<uint32_t> &instrs, size_t jr_idx,
     return {};
 
   // Step 2: Find ADDU $lw_base_reg, $rconst, $rscale within 8 instructions back.
-  // One of rs/rt should be a constant pointer, the other the scaled index.
-  uint8_t const_reg = 0xFF;
+  // One of rs/rt is the constant table pointer, the other the scaled index.
+  int addu_idx = -1;
+  uint8_t addu_rs = 0, addu_rt = 0;
   for (int j = lw_idx - 1; j >= 0 && j >= (int)jr_idx - 12; j--) {
     Instruction inst = MipsDecoder::decode(instrs[j]);
     if (inst.id == InstrId::ADDU && inst.rd == lw_base_reg) {
-      // Assume rs is the constant-address register (table_base)
-      const_reg = inst.rs;
+      addu_idx = j;
+      addu_rs = inst.rs;
+      addu_rt = inst.rt;
       break;
     }
   }
-  if (const_reg == 0xFF)
+  if (addu_idx < 0)
     return {};
 
-  // Step 3: Track const_reg back to LUI (+ optional ADDIU) within 16 instrs
+  // Step 3: Track a candidate register back to LUI (+ optional ADDIU).
+  // Whichever ADDU operand resolves to a LUI is the table base; the other
+  // one is the scaled index.
   uint32_t lui_val = 0;
   int16_t addiu_imm = 0;
-  bool found_lui = false;
-  for (int j = lw_idx - 1; j >= 0 && j >= (int)jr_idx - 20; j--) {
-    Instruction inst = MipsDecoder::decode(instrs[j]);
-    if (inst.id == InstrId::LUI && inst.rt == const_reg) {
-      lui_val = static_cast<uint32_t>(static_cast<uint16_t>(inst.imm16)) << 16;
-      found_lui = true;
-      break;
+  auto traceToLui = [&](uint8_t reg) {
+    lui_val = 0;
+    addiu_imm = 0;
+    for (int j = lw_idx - 1; j >= 0 && j >= (int)jr_idx - 20; j--) {
+      Instruction inst = MipsDecoder::decode(instrs[j]);
+      if (inst.id == InstrId::LUI && inst.rt == reg) {
+        lui_val = static_cast<uint32_t>(static_cast<uint16_t>(inst.imm16)) << 16;
+        return true;
+      }
+      if ((inst.id == InstrId::ADDIU || inst.id == InstrId::ADDI) &&
+          inst.rt == reg && inst.rs == reg) {
+        addiu_imm = inst.imm16;
+      }
     }
-    if ((inst.id == InstrId::ADDIU || inst.id == InstrId::ADDI) &&
-        inst.rt == const_reg && inst.rs == const_reg) {
-      addiu_imm = inst.imm16;
-    }
+    return false;
+  };
+
+  uint8_t scaled_reg = addu_rt;
+  if (!traceToLui(addu_rs)) {
+    scaled_reg = addu_rs;
+    if (!traceToLui(addu_rt))
+      return {};
   }
-  if (!found_lui)
-    return {};
 
   uint32_t table_addr = lui_val + static_cast<uint32_t>(addiu_imm) +
                         static_cast<uint32_t>(lw_imm);
 
-  // Step 4: Read table entries from ELF data section
+  // Step 4: Recover the entry count from the bounds check that guards the
+  // table. SLL $scaled_reg, $ridx, 2 gives the raw index register, and the
+  // SLTIU/SLTI against that register carries the number of entries.
+  uint32_t max_entries = kJumpTableFallbackEntries;
+  int sll_idx = -1;
+  uint8_t index_reg = 0;
+  for (int j = addu_idx - 1; j >= 0 && j >= (int)jr_idx - 24; j--) {
+    Instruction inst = MipsDecoder::decode(instrs[j]);
+    if (inst.id == InstrId::SLL && inst.rd == scaled_reg && inst.shamt == 2) {
+      sll_idx = j;
+      index_reg = inst.rt;
+      break;
+    }
+  }
+  if (sll_idx >= 0) {
+    for (int j = sll_idx - 1; j >= 0 && j >= (int)jr_idx - 28; j--) {
+      Instruction inst = MipsDecoder::decode(instrs[j]);
+      if ((inst.id == InstrId::SLTIU || inst.id == InstrId::SLTI) &&
+          inst.rs == index_reg) {
+        uint32_t bound = static_cast<uint32_t>(static_cast<uint16_t>(inst.imm16));
+        if (bound > 0 && bound <= kJumpTableMaxEntries)
+          max_entries = bound;
+        break;
+      }
+    }
+  }
+
+  // Step 5: Read table entries from ELF data section
   const Section *section = parser.findSectionByAddress(table_addr);
   if (!section || section->data == nullptr)
     return {};
 
   uint32_t offset = table_addr - section->vaddr;
   std::vector<uint32_t> targets;
-  for (uint32_t i = 0; i < 64; i++) {
+  for (uint32_t i = 0; i < max_entries; i++) {
     uint32_t entry_offset = offset + i * 4;
     if (entry_offset + 4 > section->size)
       break;
