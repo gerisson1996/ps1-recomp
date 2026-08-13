@@ -140,6 +140,27 @@ public:
   /// `gpu_drawsync_index_addr` / `gpu_drawsync_count`.
   GpuDrawSync drawSync;
 
+  // Root-counter tick accumulator
+  /// PS1 RAM address of a game-owned tick word that a root-counter IRQ
+  /// callback would increment on real hardware.  Zero disables the whole
+  /// mechanism.  Set from the game TOML's `[timing]` block.
+  ///
+  /// Games that drive their frame delta off a root counter register an
+  /// `OpenEvent(0xF200000N, EvSpINT, EvMdINTR, fn)` and arm `SetRCnt` with
+  /// a target; the BIOS then runs `fn` every time the counter reaches it.
+  /// This runtime models interrupts cooperatively and never fires that
+  /// callback, so the word stays frozen and every time-driven wait in the
+  /// game stalls or crawls.  These two fields let the VSync HLE advance it
+  /// at the right rate instead.
+  uint32_t rcntTickAddr = 0;
+
+  /// Units to add to `rcntTickAddr` per elapsed VBlank.  Derived per game
+  /// from the counter's clock and target: for a counter running at
+  /// sysclk/8 (4.2336 MHz) with target T, the callback fires
+  /// `4233600 / T` times a second, i.e. `4233600 / (T * 60)` per VBlank.
+  /// Zero disables.
+  uint32_t rcntTicksPerVBlank = 0;
+
   // Test helpers
   /// Reset every field to its default-constructed value.  Tests call
   /// this in `SetUp()` to isolate cases sharing the singleton.

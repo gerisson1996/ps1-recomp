@@ -1,5 +1,7 @@
 #include "runtime/gpu/gpu.h"
+#include "runtime/metrics.h"
 #include <algorithm>
+#include <cstdio>
 #include <cstring>
 #include <cstdint>
 #include <fmt/format.h>
@@ -101,9 +103,11 @@ void GPU::writeGP0(uint32_t val) {
     static int gp0Count = 0;
     static std::unordered_map<uint8_t, int> opcodeHist;
     gp0Count++;
+    gp0Words_.fetch_add(1, std::memory_order_relaxed);
     if (!vramTransfer_.isWritingToVRAM && !isCommandExecuting_) {
       uint8_t op = val >> 24;
       opcodeHist[op]++;
+      gp0Hist_[op].fetch_add(1, std::memory_order_relaxed);
     }
     if (gp0Count == 500 || gp0Count == 2000 || gp0Count == 5000) {
       fmt::print(stderr, "[GPU] GP0 command histogram after {} calls:\n", gp0Count);
@@ -397,8 +401,11 @@ void GPU::writeGP1(uint32_t val) {
     displayVRAMXStart_ = val & 0x3FF;
     displayVRAMYStart_ = (val >> 10) & 0x1FF;
     displayAreaSet_ = true;
-    { static int cnt=0; if(cnt++<20) fmt::print(stderr,"[GPU] GP1(0x05): display area -> ({},{})\n",
+    { static int cnt=0; if(cnt++<20) fmt::print(stderr,"[GPU] GP1(0x05) (sample, first 20): display area -> ({},{})\n",
       displayVRAMXStart_, displayVRAMYStart_); }
+    ps1::metrics::count("gp1.display_area");
+    ps1::metrics::setState("display.x", static_cast<int64_t>(displayVRAMXStart_));
+    ps1::metrics::setState("display.y", static_cast<int64_t>(displayVRAMYStart_));
     break;
   case 0x06: // Horizontal Display Range
     displayX1_ = val & 0xFFF;
@@ -1306,16 +1313,31 @@ void GPU::executeFillRect() {
 
   uint32_t x = pos & 0x3FF;
   uint32_t y = (pos >> 16) & 0x1FF;
+  // GP0(02h) size semantics differ from the A0h/C0h transfer commands: there a
+  // zero dimension means "the full 1024/512", here it means "fill nothing".
+  // Width rounds up to a multiple of 16, height is masked to 9 bits (psx-spx,
+  // Fill Rectangle in VRAM).
+  //
+  // Treating a zero height as 512 is what erased the game's texture pages: the
+  // per-frame clear at (0,12)/(512,12) became 512 rows tall, wrapped past the
+  // bottom of VRAM through the `% VRAM_HEIGHT` below, and wiped y=384..511 --
+  // exactly where the two 256x128 texture pages are uploaded. Sprites then
+  // sampled transparent texels and drew nothing.
+  // Deviation left in place deliberately: psx-spx also rounds the width up to a
+  // multiple of 16. That is not done here because no observed command needs it,
+  // and applying it would widen every small fill (a 5px request becomes 16px).
   uint32_t w = size & 0x3FF;
-  // width/height of 0 means 1024/512
-  w = ((w - 1) & 0x3FF) + 1;
   uint32_t h = (size >> 16) & 0x1FF;
-  h = ((h - 1) & 0x1FF) + 1;
+  if (w == 0 || h == 0) {
+    ps1::metrics::count("fill_rect_zero");
+    return;
+  }
 
   static int fillCount = 0;
   if (++fillCount <= 10)
-    fmt::print(stderr, "[GPU] FillRect #{}: color=0x{:06X} pos=({},{}) size={}x{}\n",
+    fmt::print(stderr, "[GPU] FillRect #{} (sample, first 10): color=0x{:06X} pos=({},{}) size={}x{}\n",
                fillCount, color, x, y, w, h);
+  ps1::metrics::count("fill_rect");
 
   // Convert 24-bit RGB to 15-bit
   uint16_t r5 = (color & 0xFF) >> 3;
@@ -1341,11 +1363,12 @@ void GPU::executeCPUToVRAM() {
 
   static int cpuVramCount = 0;
   if (++cpuVramCount <= 20) {
-    fmt::print(stderr, "[GPU] CPU->VRAM #{}: dest=({},{}) size={}x{} (opcode=0x{:02X})\n",
+    fmt::print(stderr, "[GPU] CPU->VRAM #{} (sample, first 20): dest=({},{}) size={}x{} (opcode=0x{:02X})\n",
                cpuVramCount, pos & 0x3FF, (pos >> 16) & 0x1FF,
                size & 0xFFFF, (size >> 16) & 0xFFFF,
                commandQueue_[0] >> 24);
   }
+  ps1::metrics::count("cpu_to_vram");
 
   vramTransfer_.destX = pos & 0x3FF;
   vramTransfer_.destY = (pos >> 16) & 0x1FF;
@@ -1715,6 +1738,25 @@ void GPU::rasterizeGouraudTexturedTriangle(Vertex v0, Vertex v1, Vertex v2,
       }
     }
   }
+}
+
+void GPU::publishMetrics() const {
+  // ps1::metrics::count() accumulates, so publish the delta since the last
+  // call rather than the whole histogram: main_host calls this from both
+  // shutdown paths, and re-publishing the totals doubled every gp0.op.XX.
+  char name[16];
+  for (int op = 0; op < 256; ++op) {
+    const uint64_t n = gp0Hist_[op].load(std::memory_order_relaxed);
+    const uint64_t delta = n - gp0HistPublished_[op];
+    if (delta == 0)
+      continue;
+    gp0HistPublished_[op] = n;
+    std::snprintf(name, sizeof(name), "gp0.op.%02X", op);
+    ps1::metrics::count(name, delta);
+  }
+  const uint64_t words = gp0Words_.load(std::memory_order_relaxed);
+  ps1::metrics::count("gp0.words", words - gp0WordsPublished_);
+  gp0WordsPublished_ = words;
 }
 
 } // namespace ps1::gpu

@@ -8,6 +8,7 @@
 #include "runtime/psyq/psyq_libgpu.h"
 #include "runtime/psyq/psyq_libgte.h"
 #include "runtime/psyq/psyq_pad.h"
+#include "runtime/metrics.h"
 
 #include <cstdlib>
 #include <cstring>
@@ -75,6 +76,11 @@ void psyq_dispatch(const char *name, recomp_context *ctx) {
                name, ctx->r[31]);
     std::abort();
   }
+  if (ps1::metrics::enabled()) {
+    std::string key = "hle.";
+    key += name;
+    ps1::metrics::count(key);
+  }
   it->second(ctx);
 }
 
@@ -109,6 +115,15 @@ void psyq_registry_init_defaults() {
   // TermPrim, immediate-mode draws via DrawPrim).
   psyq_register("libapi_StopRCnt",       &hle_noop_stub);
   psyq_register("libapi_StartRCnt",      &hle_noop_stub);
+  // SetRCnt(spec, target, mode) programs a root counter's compare value. The
+  // runtime models interrupts cooperatively, so no counter ever reaches a
+  // target and no handler ever fires -- accepting and discarding the target is
+  // consistent with Start/StopRCnt above. What the target *implies* is not
+  // discarded, though: for a game whose frame delta is driven by a root-counter
+  // handler, `[timing] rcnt_ticks_per_vblank` in the game TOML carries the
+  // resulting rate, and `applyRootCounterTicks` advances the word from VSync.
+  // (Crash: target 0x1000 on counter 2 at sysclk/8 => ~17 ticks per VBlank.)
+  psyq_register("libapi_SetRCnt",        &hle_noop_stub);
   psyq_register("libcd_StCdInterrupt2",  &hle_noop_stub);
   psyq_register("libgpu__reset",         &hle_noop_stub);
   psyq_register("libgpu_TermPrim",       &hle_noop_stub);

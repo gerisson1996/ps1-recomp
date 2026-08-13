@@ -344,6 +344,61 @@ void SPU::keyOffVoice(uint32_t idx) {
 }
 
 // ADPCM Decoding
+//
+// Block layout and the decode formula are documented in psx-spx
+// (PS1Recomp-workspace/psx-spx.github.io/docs/):
+//   soundprocessingunitspu.md:116-125  16-byte block: shift/filter, flags,
+//                                       14 bytes of 2-nibbles-per-byte data
+//   soundprocessingunitspu.md:119      "Shift/Filter (reportedly same as for
+//                                       CD-XA)"
+//   cdromformat.md:827-838             decode_28_nibbles(): shift = 12 -
+//                                       header_shift, t = signed4bit(nibble),
+//                                       s = (t<<shift) + (old*f0+older*f1+32)
+//                                       /64, clamped to -8000h..+7FFFh
+//   cdromformat.md:843-844,846-847     pos/neg coefficient tables; SPU-ADPCM
+//                                       uses all 5 filters (0..4), XA only 4
+//
+// Cross-checked against the semantic reference runtime
+// (CrashBandicoot-Launcher/RecompOne.Runtime/Hardware/Spu.cs:483-538,
+// DecodeBlock/DecodeSample).
+
+namespace {
+
+// Decode the 14 compressed data bytes of one SPU-ADPCM block into 28 PCM
+// samples, updating the running prediction state (prevSample1/2 = the two
+// most recently decoded samples, "old"/"older" in the psx-spx pseudocode).
+void decodeAdpcmBlockData(const uint8_t *dataBytes14, uint8_t shiftRaw,
+                          int32_t f0, int32_t f1, int16_t &prevSample1,
+                          int16_t &prevSample2,
+                          int16_t out[ADPCM_SAMPLES_PER_BLOCK]) {
+  // cdromformat.md:780,788 -- reserved shift values 13..15 act as shift=9.
+  uint8_t clampedShiftRaw = (shiftRaw > 12) ? 9 : shiftRaw;
+  int32_t shift = 12 - clampedShiftRaw;
+
+  for (int i = 0; i < 14; i++) {
+    uint8_t dataByte = dataBytes14[i];
+    for (int nibble = 0; nibble < 2; nibble++) {
+      // Sign-extend the 4-bit nibble (cdromformat.md:834, signed4bit()):
+      // values 8..15 represent -8..-1. Casting a 0..15 value straight to
+      // int8_t and *then* shifting does not sign-extend, because the shift
+      // operand is promoted to `int` first -- the shift must place the
+      // nibble's top bit at bit 7 of an 8-bit value before the cast.
+      uint8_t raw = (dataByte >> (nibble * 4)) & 0x0F;
+      int32_t t = (raw < 8) ? static_cast<int32_t>(raw)
+                            : static_cast<int32_t>(raw) - 16;
+
+      int32_t sample = (t << shift);
+      sample += (prevSample1 * f0 + prevSample2 * f1 + 32) / 64;
+      sample = std::clamp(sample, -32768, 32767);
+
+      prevSample2 = prevSample1;
+      prevSample1 = static_cast<int16_t>(sample);
+      out[i * 2 + nibble] = static_cast<int16_t>(sample);
+    }
+  }
+}
+
+} // namespace
 
 void SPU::advanceAdpcmBlock(Voice &v) {
   // Read the header byte of the 16-byte ADPCM block
@@ -355,32 +410,14 @@ void SPU::advanceAdpcmBlock(Voice &v) {
   if (filter > 4)
     filter = 4;
 
-  int32_t f0 = ADPCM_FILTER_POS[filter];
-  int32_t f1 = ADPCM_FILTER_NEG[filter];
-
-  // Decode 28 samples from 14 data bytes (2 nibbles per byte)
+  uint8_t dataBytes[14];
   for (int i = 0; i < 14; i++) {
-    uint8_t dataByte = soundRam_[(v.currentAddr + 2 + i) % SOUND_RAM_SIZE];
-    for (int nibble = 0; nibble < 2; nibble++) {
-      int32_t sample;
-      if (nibble == 0) {
-        sample =
-            static_cast<int32_t>(static_cast<int8_t>(dataByte & 0x0F) << 4) >>
-            4;
-      } else {
-        sample =
-            static_cast<int32_t>(static_cast<int8_t>(dataByte & 0xF0)) >> 4;
-      }
-
-      sample <<= (12 - shift);
-      sample += (v.prevSample1 * f0 + v.prevSample2 * f1 + 32) / 64;
-      sample = std::clamp(sample, -32768, 32767);
-
-      v.prevSample2 = v.prevSample1;
-      v.prevSample1 = static_cast<int16_t>(sample);
-      v.decodedSamples[i * 2 + nibble] = static_cast<int16_t>(sample);
-    }
+    dataBytes[i] = soundRam_[(v.currentAddr + 2 + i) % SOUND_RAM_SIZE];
   }
+
+  decodeAdpcmBlockData(dataBytes, shift, ADPCM_FILTER_POS[filter],
+                       ADPCM_FILTER_NEG[filter], v.prevSample1,
+                       v.prevSample2, v.decodedSamples);
 
   v.decodedIndex = 0;
 
@@ -401,18 +438,21 @@ void SPU::advanceAdpcmBlock(Voice &v) {
     v.currentAddr = 0;
   }
 
-  if (flags & 0x01) { // End flag
+  if (flags & 0x01) { // Loop End: set ENDX and jump, regardless of bit 1.
+    // soundprocessingunitspu.md:130,135-141: Code 1 (End+Mute, bit1=0) and
+    // Code 3 (End+Repeat, bit1=1) both "jump to Loop-address, set ENDX
+    // flag"; only Code 1 additionally forces Release with envelope zeroed.
     v.endFlag = true;
-    endxFlags_ |= (1 << (&v - voices_)); // set ENDX bit
+    endxFlags_ |= (1u << (&v - voices_)); // set ENDX bit
+    v.currentAddr = static_cast<uint32_t>(v.repeatAddr) * 8;
+    v.loopFlag = true;
 
-    if (flags & 0x02) { // Loop flag -- jump to repeat address
-      v.currentAddr = static_cast<uint32_t>(v.repeatAddr) * 8;
-      v.loopFlag = true;
-    } else {
-      // Voice stops
-      v.adsrPhase = AdsrPhase::Off;
+    if (!(flags & 0x02)) {
+      // Code 1 = End+Mute: force Release phase, envelope to zero.
+      v.adsrPhase = AdsrPhase::Release;
       v.adsrVolume = 0;
     }
+    // Code 3 (flags & 0x02) = End+Repeat: jump only, envelope untouched.
   }
 }
 
@@ -421,6 +461,28 @@ int16_t SPU::decodeAdpcmSample(Voice &v) {
     advanceAdpcmBlock(v);
   }
   return v.decodedSamples[v.decodedIndex];
+}
+
+std::array<int16_t, ADPCM_SAMPLES_PER_BLOCK>
+SPU::decodeAdpcmBlockForTest(const uint8_t block[ADPCM_BLOCK_SIZE],
+                             int16_t prevSample1, int16_t prevSample2) const {
+  uint8_t header = block[0];
+  uint8_t shift = header & 0x0F;
+  uint8_t filter = (header >> 4) & 0x07;
+  if (filter > 4)
+    filter = 4;
+
+  std::array<int16_t, ADPCM_SAMPLES_PER_BLOCK> out{};
+  decodeAdpcmBlockData(block + 2, shift, ADPCM_FILTER_POS[filter],
+                       ADPCM_FILTER_NEG[filter], prevSample1, prevSample2,
+                       out.data());
+  return out;
+}
+
+SPU::VoiceDebugState SPU::debugVoiceState(uint32_t voiceIdx) const {
+  std::lock_guard<std::mutex> lock(mutex_);
+  const Voice &v = voices_[voiceIdx];
+  return VoiceDebugState{v.currentAddr, v.repeatAddr, v.loopFlag, v.endFlag};
 }
 
 // ADSR

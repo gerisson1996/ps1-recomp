@@ -11,6 +11,7 @@ add_executable(ps1Analyzer_tests
     analyzer/test_psyq_hash_matching.cpp
     analyzer/test_config_generator.cpp
     analyzer/test_overlay_scanner.cpp
+    analyzer/test_function_boundaries.cpp
 )
 
 target_link_libraries(ps1Analyzer_tests
@@ -36,6 +37,8 @@ add_executable(ps1Recomp_tests
     recompiler/test_gte_emitter.cpp
     recompiler/test_overlay_handler.cpp
     recompiler/test_hle_emission.cpp
+    recompiler/test_dispatch_emitter.cpp
+    recompiler/test_forward_branch.cpp
 )
 
 target_link_libraries(ps1Recomp_tests
@@ -100,6 +103,9 @@ add_executable(ps1Runtime_tests
     runtime/test_psyq_pad.cpp
     runtime/test_psyq_libc.cpp
     runtime/test_psyq_state.cpp
+    runtime/test_metrics.cpp
+    runtime/test_gool.cpp
+    runtime/test_golden_frame.cpp
 )
 
 target_include_directories(ps1Runtime_tests

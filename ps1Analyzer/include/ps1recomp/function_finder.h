@@ -76,7 +76,65 @@ inline bool isStackEpilogue(uint32_t instr) {
 /// Check if instruction is a NOP (0x00000000)
 inline bool isNOP(uint32_t instr) { return instr == 0; }
 
+/// Check if instruction is JR (any register)
+inline bool isJR(uint32_t instr) {
+  return getOpcode(instr) == OP_SPECIAL && getFunction(instr) == FUNC_JR;
+}
+
+/// Check if instruction is an unconditional J (not JAL)
+inline bool isJ(uint32_t instr) { return getOpcode(instr) == OP_J; }
+
+/// Check if instruction is a PC-relative conditional branch (BEQ/BNE/BLEZ/
+/// BGTZ or a REGIMM BLTZ/BGEZ family member).
+inline bool isBranch(uint32_t instr) {
+  const uint32_t op = getOpcode(instr);
+  return op == OP_BEQ || op == OP_BNE || op == OP_BLEZ || op == OP_BGTZ ||
+         op == OP_REGIMM;
+}
+
+/// Compute a PC-relative branch target: PC + 4 + (signed imm16 << 2)
+inline uint32_t branchTarget(uint32_t pc, uint32_t instr) {
+  return pc + 4 + (static_cast<uint32_t>(static_cast<int32_t>(getImm16(instr)))
+                   << 2);
+}
+
+/// Check if instruction loads from memory into a register (LB..LWR).
+inline bool isLoad(uint32_t instr) {
+  const uint32_t op = getOpcode(instr);
+  return op >= 0x20 && op <= 0x26; // LB, LH, LWL, LW, LBU, LHU, LWR
+}
+
+/// Does `instr` write general-purpose register `reg`?
+/// Conservative: covers R-type rd writes, loads, and the immediate ALU forms.
+bool writesRegister(uint32_t instr, uint32_t reg);
+
 } // namespace mips
+
+/// Find where a function actually ends.
+///
+/// A function does **not** end at the first `jr` it contains: hand-written MIPS
+/// routinely branches forward over its own epilogue, and jump tables reach
+/// labels far past it. Ending there splits one function in two, and the branch
+/// that crossed the cut then has to be emitted as a call into the middle of
+/// another function -- an address the recompiler never emits, which the
+/// dispatcher can only fail on.
+///
+/// So the scan tracks `reach`, the furthest forward target seen so far, and
+/// accepts a terminator only once it lies at or past `reach`. `jr $ra` always
+/// terminates; `jr $reg` terminates only when `$reg` was not loaded from memory
+/// (a loaded register means a jump table or computed jump, which stays inside
+/// the function).
+///
+/// @param words       Instruction words, starting at `startAddr`.
+/// @param startAddr   Virtual address of `words[0]`.
+/// @param maxEndAddr  Hard upper bound (the next known entry point, or the end
+///                    of the section). Never returns past this.
+/// @return Address one past the function's last instruction, delay slot
+///         included. Falls back to `maxEndAddr` when no terminator qualifies.
+uint32_t refineFunctionEnd(const std::vector<uint32_t> &words,
+                           uint32_t startAddr, uint32_t maxEndAddr);
+
+
 
 // Function Detection Source
 
@@ -100,6 +158,20 @@ struct FunctionInfo {
     return address < other.address;
   }
 };
+
+/// Shrink any function that extends into the next one.
+///
+/// Sizes arrive from several places -- the ELF symbol table, the gap to the
+/// next detected entry, `--add-func` on the command line -- and the later
+/// sources do not revisit the earlier ones. So adding an entry point inside an
+/// already-sized function leaves that function's extent untouched, and the
+/// overlapping bytes get emitted twice, under two different function names and
+/// two sets of labels. Every `--add-func` used to work around weak detection
+/// created one of these.
+///
+/// Expects `funcs` sorted by address; sorts it if not. Leaves the last
+/// function alone (nothing follows it to overlap).
+void clampOverlappingSizes(std::vector<FunctionInfo> &funcs);
 
 // FunctionFinder
 

@@ -30,10 +30,10 @@ from starlette.routing import Mount, Route
 
 PCSX_BASE    = "http://localhost:8079"
 MCP_PORT     = 8078
-VRAM_OUT     = "C:/temp/pcsx_vram.png"
-SHOT_OUT     = "C:/temp/pcsx_screenshot.png"
-CMD_FILE     = "C:/temp/pcsx_cmd.lua"
-RESULT_FILE  = "C:/temp/pcsx_result.txt"
+VRAM_OUT     = "/tmp/pcsx_vram.png"
+SHOT_OUT     = "/tmp/pcsx_screenshot.png"
+CMD_FILE     = "/tmp/pcsx_cmd.lua"
+RESULT_FILE  = "/tmp/pcsx_result.txt"
 RAM_SIZE     = 0x200000
 SCRATCH_SIZE = 0x400
 LUA_TIMEOUT  = 5.0

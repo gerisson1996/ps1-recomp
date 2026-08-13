@@ -61,6 +61,11 @@ void hle_libgpu_SetVideoMode(recomp_context *ctx);
 /// GetVideoMode(): returns current video mode (0=NTSC, 1=PAL).
 void hle_libgpu_GetVideoMode(recomp_context *ctx);
 
+/// C++-side accessor for the current video mode (0=NTSC, 1=PAL), for other
+/// HLE modules (PutDispEnv, SetDefDrawEnv) that must follow the same
+/// PAL/NTSC branch the PsyQ source takes internally via GetVideoMode().
+int getVideoMode();
+
 // Group 1.A -- libgs scene-graph wrappers (NOP stubs)
 //
 // Both Rayman and Crash bypass libgs and drive libgpu directly. These stubs

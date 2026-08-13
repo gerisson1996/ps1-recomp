@@ -112,6 +112,29 @@ public:
   // Thread safety for audio callback
   std::mutex &getMutex() { return mutex_; }
 
+  // Test-only hook (ps1Test/runtime/test_spu.cpp): decode a single 16-byte
+  // SPU-ADPCM block in isolation, using the same algorithm as
+  // advanceAdpcmBlock() (see spu.cpp for citations), so decoded PCM output
+  // can be checked against hand-worked values without routing through
+  // pitch/ADSR/mixing.
+  std::array<int16_t, ADPCM_SAMPLES_PER_BLOCK>
+  decodeAdpcmBlockForTest(const uint8_t block[ADPCM_BLOCK_SIZE],
+                          int16_t prevSample1, int16_t prevSample2) const;
+
+  // Test-only accessor (ps1Test/runtime/test_spu.cpp): a voice's ADPCM
+  // playback/loop state. Needed because an End+Mute block can force
+  // AdsrPhase::Off within a sample or two of being read, which would
+  // otherwise make the repeat-address jump unobservable through audio
+  // output or through registers (there is no hardware-readable "current
+  // address" register).
+  struct VoiceDebugState {
+    uint32_t currentAddr; // byte address in SPU RAM of the next block to read
+    uint16_t repeatAddr;  // loop target, in 8-byte units
+    bool loopFlag;
+    bool endFlag;
+  };
+  VoiceDebugState debugVoiceState(uint32_t voiceIdx) const;
+
 private:
   // Voices
   Voice voices_[NUM_VOICES];

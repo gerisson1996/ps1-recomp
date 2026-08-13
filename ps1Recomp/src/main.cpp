@@ -8,6 +8,7 @@
 #include <fstream>
 #include <map>
 #include <set>
+#include <ps1recomp/dispatch_emitter.h>
 #include <ps1recomp/elf_parser.h>
 #include <ps1recomp/hle_emitter.h>
 #include <ps1recomp/instruction_emitter.h>
@@ -22,16 +23,27 @@ using namespace ps1recomp;
 // Jump Table Auto-Detection
 //
 // Detects the canonical MIPS switch table pattern:
-//   LUI   $rbase, hi       ; rbase = upper address
-//   ADDIU $rbase, $rbase, lo ; rbase = table_base
-//   ADDU  $rtbl, $rbase, $ridx  ; rtbl = table_base + index*4
-//   LW    $rtgt, N($rtbl)  ; rtgt = table[index]
-//   JR    $rtgt             ; indirect jump
+//   SLTIU $rchk, $ridx, N     ; bounds check against the entry count
+//   BEQZ  $rchk, default      ; out-of-range -> default case
+//   SLL   $rscale, $ridx, 2   ; scale index to a word offset (delay slot)
+//   LUI   $rbase, hi          ; rbase = upper address
+//   ADDIU $rbase, $rbase, lo  ; rbase = table_base
+//   ADDU  $rtbl, $rbase, $rscale ; rtbl = table_base + index*4
+//   LW    $rtgt, N($rtbl)     ; rtgt = table[index]
+//   JR    $rtgt               ; indirect jump
 //
 // When found, reads the target addresses from the ELF data section
 // and stores them in a JumpTableEntry on the RecompFunction.
 //
+// The entry count comes from the SLTIU/SLTI bounds check when one is present.
+// Without it there is nothing in the code stream that marks where the table
+// ends, so we fall back to a conservative fixed window: a table is only
+// distinguishable from the data that follows it by that bound.
+//
 // Returns a vector of target addresses (empty if pattern not found).
+static constexpr uint32_t kJumpTableFallbackEntries = 64;
+static constexpr uint32_t kJumpTableMaxEntries = 4096;
+
 static std::vector<uint32_t>
 detectJumpTable(const std::vector<uint32_t> &instrs, size_t jr_idx,
                 const ElfParser &parser) {
@@ -58,49 +70,88 @@ detectJumpTable(const std::vector<uint32_t> &instrs, size_t jr_idx,
     return {};
 
   // Step 2: Find ADDU $lw_base_reg, $rconst, $rscale within 8 instructions back.
-  // One of rs/rt should be a constant pointer, the other the scaled index.
-  uint8_t const_reg = 0xFF;
+  // One of rs/rt is the constant table pointer, the other the scaled index.
+  int addu_idx = -1;
+  uint8_t addu_rs = 0, addu_rt = 0;
   for (int j = lw_idx - 1; j >= 0 && j >= (int)jr_idx - 12; j--) {
     Instruction inst = MipsDecoder::decode(instrs[j]);
     if (inst.id == InstrId::ADDU && inst.rd == lw_base_reg) {
-      // Assume rs is the constant-address register (table_base)
-      const_reg = inst.rs;
+      addu_idx = j;
+      addu_rs = inst.rs;
+      addu_rt = inst.rt;
       break;
     }
   }
-  if (const_reg == 0xFF)
+  if (addu_idx < 0)
     return {};
 
-  // Step 3: Track const_reg back to LUI (+ optional ADDIU) within 16 instrs
+  // Step 3: Track a candidate register back to LUI (+ optional ADDIU).
+  // Whichever ADDU operand resolves to a LUI is the table base; the other
+  // one is the scaled index.
   uint32_t lui_val = 0;
   int16_t addiu_imm = 0;
-  bool found_lui = false;
-  for (int j = lw_idx - 1; j >= 0 && j >= (int)jr_idx - 20; j--) {
-    Instruction inst = MipsDecoder::decode(instrs[j]);
-    if (inst.id == InstrId::LUI && inst.rt == const_reg) {
-      lui_val = static_cast<uint32_t>(static_cast<uint16_t>(inst.imm16)) << 16;
-      found_lui = true;
-      break;
+  auto traceToLui = [&](uint8_t reg) {
+    lui_val = 0;
+    addiu_imm = 0;
+    for (int j = lw_idx - 1; j >= 0 && j >= (int)jr_idx - 20; j--) {
+      Instruction inst = MipsDecoder::decode(instrs[j]);
+      if (inst.id == InstrId::LUI && inst.rt == reg) {
+        lui_val = static_cast<uint32_t>(static_cast<uint16_t>(inst.imm16)) << 16;
+        return true;
+      }
+      if ((inst.id == InstrId::ADDIU || inst.id == InstrId::ADDI) &&
+          inst.rt == reg && inst.rs == reg) {
+        addiu_imm = inst.imm16;
+      }
     }
-    if ((inst.id == InstrId::ADDIU || inst.id == InstrId::ADDI) &&
-        inst.rt == const_reg && inst.rs == const_reg) {
-      addiu_imm = inst.imm16;
-    }
+    return false;
+  };
+
+  uint8_t scaled_reg = addu_rt;
+  if (!traceToLui(addu_rs)) {
+    scaled_reg = addu_rs;
+    if (!traceToLui(addu_rt))
+      return {};
   }
-  if (!found_lui)
-    return {};
 
   uint32_t table_addr = lui_val + static_cast<uint32_t>(addiu_imm) +
                         static_cast<uint32_t>(lw_imm);
 
-  // Step 4: Read table entries from ELF data section
+  // Step 4: Recover the entry count from the bounds check that guards the
+  // table. SLL $scaled_reg, $ridx, 2 gives the raw index register, and the
+  // SLTIU/SLTI against that register carries the number of entries.
+  uint32_t max_entries = kJumpTableFallbackEntries;
+  int sll_idx = -1;
+  uint8_t index_reg = 0;
+  for (int j = addu_idx - 1; j >= 0 && j >= (int)jr_idx - 24; j--) {
+    Instruction inst = MipsDecoder::decode(instrs[j]);
+    if (inst.id == InstrId::SLL && inst.rd == scaled_reg && inst.shamt == 2) {
+      sll_idx = j;
+      index_reg = inst.rt;
+      break;
+    }
+  }
+  if (sll_idx >= 0) {
+    for (int j = sll_idx - 1; j >= 0 && j >= (int)jr_idx - 28; j--) {
+      Instruction inst = MipsDecoder::decode(instrs[j]);
+      if ((inst.id == InstrId::SLTIU || inst.id == InstrId::SLTI) &&
+          inst.rs == index_reg) {
+        uint32_t bound = static_cast<uint32_t>(static_cast<uint16_t>(inst.imm16));
+        if (bound > 0 && bound <= kJumpTableMaxEntries)
+          max_entries = bound;
+        break;
+      }
+    }
+  }
+
+  // Step 5: Read table entries from ELF data section
   const Section *section = parser.findSectionByAddress(table_addr);
   if (!section || section->data == nullptr)
     return {};
 
   uint32_t offset = table_addr - section->vaddr;
   std::vector<uint32_t> targets;
-  for (uint32_t i = 0; i < 64; i++) {
+  for (uint32_t i = 0; i < max_entries; i++) {
     uint32_t entry_offset = offset + i * 4;
     if (entry_offset + 4 > section->size)
       break;
@@ -698,7 +749,10 @@ int main(int argc, char *argv[]) {
     result_cpp += "\n// Dispatch Table\n";
     result_cpp += "// Maps PS1 addresses to recompiled function pointers\n";
     result_cpp += "// Populated once at startup, queried on every indirect call/jump\n\n";
-    result_cpp += "#include <unordered_map>\n\n";
+    result_cpp += "#include <unordered_map>\n";
+    result_cpp += "#include <cstdlib>\n"; // getenv, abort
+    result_cpp += "#include <cstring>\n"; // strcmp
+    result_cpp += "#include <cstdio>\n\n"; // fflush
     result_cpp +=
         "typedef void (*recomp_func_t)(uint8_t*, recomp_context*);\n\n";
 
@@ -722,108 +776,9 @@ int main(int argc, char *argv[]) {
     result_cpp += "    return (it != recomp_func_table.end()) ? it->second : nullptr;\n";
     result_cpp += "}\n\n";
 
-    // Override registration: lets main_host.cpp replace any function entry
-    // with a C++ stub.  Used for env-gated per-game patches (e.g. Crash
-    // PS1_SKIP_31BF8) where a single MIPS function needs to be NOP'd
-    // without modifying the generated source.  Forward-declared in
-    // `runtime/ps1_runtime_macros.h`-adjacent headers.
-    result_cpp += "void recomp_register_override(uint32_t addr, recomp_func_t fn) {\n";
-    result_cpp += "    if (!recomp_table_ready) recomp_init_dispatch_table();\n";
-    result_cpp += "    recomp_func_table[addr] = fn;\n";
-    result_cpp += "}\n\n";
-
-    // Main dispatch function
-    result_cpp += "void recomp_dispatch(uint8_t* rdram, recomp_context* ctx, "
-                  "uint32_t addr) {\n";
-    result_cpp += "    // Lazy-init on first call\n";
-    result_cpp += "    if (!recomp_table_ready) recomp_init_dispatch_table();\n\n";
-
-    // Step 1: NULL pointer guard
-    // Null dispatches are benign at startup (uninitialized callback pointers).
-    // Log only once so noise is minimal, then silently drop subsequent calls.
-    result_cpp += "    // 1. NULL pointer guard\n";
-    result_cpp += "    if (addr == 0) [[unlikely]] {\n";
-    result_cpp += "        static bool nullDispatchWarned = false;\n";
-    result_cpp += "        if (!nullDispatchWarned) {\n";
-    result_cpp += "            nullDispatchWarned = true;\n";
-    result_cpp += "            fmt::print(\"[DISPATCH] null addr suppressed"
-                  " (startup transient, RA=0x{:08X})\\n\", ctx->r[31]);\n";
-    result_cpp += "        }\n";
-    result_cpp += "        return;\n";
-    result_cpp += "    }\n\n";
-
-    // Step 2: Direct lookup
-    result_cpp += "    // 2. Direct lookup in dispatch table\n";
-    result_cpp += "    recomp_func_t fn = recomp_lookup(addr);\n";
-    result_cpp += "    if (fn) { fn(rdram, ctx); return; }\n\n";
-
-    // Step 3: Normalize address (KSEG0/KSEG1 -> canonical KSEG0) and retry
-    result_cpp += "    // 3. Address normalization (KSEG mirrors) and retry\n";
-    result_cpp += "    uint32_t phys = addr & 0x1FFFFFFFu;\n";
-    result_cpp += "    uint32_t normalized = phys | 0x80000000u;\n";
-    result_cpp += "    if (normalized != addr) {\n";
-    result_cpp += "        fn = recomp_lookup(normalized);\n";
-    result_cpp += "        if (fn) { fn(rdram, ctx); return; }\n";
-    result_cpp += "    }\n\n";
-
-    // Step 4: BIOS entry points A0/B0/C0 (any KSEG mirror)
-    result_cpp += "    // 4. BIOS entry points (A0, B0, C0 -- any KSEG mirror)\n";
-    result_cpp += "    if (ctx->bios) {\n";
-    result_cpp += "        if (phys == 0xA0) { ctx->bios->executeA0(); return; }\n";
-    result_cpp += "        if (phys == 0xB0) { ctx->bios->executeB0(); return; }\n";
-    result_cpp += "        if (phys == 0xC0) { ctx->bios->executeC0(); return; }\n";
-    result_cpp += "    }\n\n";
-
-    // Step 5: BIOS table sentinel addresses
-    // The BIOS fills B0/C0 tables with sentinel addresses 0x0000B0xx/0x0000C0xx.
-    // When the game reads a table entry and jalr's to it, we intercept here.
-    result_cpp += "    // 5. BIOS table sentinel dispatch (B0:xx / C0:xx)\n";
-    result_cpp += "    if (ctx->bios) {\n";
-    result_cpp += "        if (phys >= 0xB000 && phys < 0xB100) {\n";
-    result_cpp += "            ctx->r[9] = phys & 0xFF; // set $t1 = function index\n";
-    result_cpp += "            ctx->bios->executeB0();\n";
-    result_cpp += "            return;\n";
-    result_cpp += "        }\n";
-    result_cpp += "        if (phys >= 0xC000 && phys < 0xC100) {\n";
-    result_cpp += "            ctx->r[9] = phys & 0xFF;\n";
-    result_cpp += "            ctx->bios->executeC0();\n";
-    result_cpp += "            return;\n";
-    result_cpp += "        }\n";
-    result_cpp += "        if (phys >= 0xA000 && phys < 0xA100) {\n";
-    result_cpp += "            ctx->r[9] = phys & 0xFF;\n";
-    result_cpp += "            ctx->bios->executeA0();\n";
-    result_cpp += "            return;\n";
-    result_cpp += "        }\n";
-    result_cpp += "    }\n\n";
-
-    // Step 6: RAM JR-RA trampoline detection
-    // BIOS or game may write JR RA (0x03E00008) at hook addresses.
-    // If target RAM contains JR RA, the intended behavior is "just return".
-    result_cpp += "    // 6. JR RA trampoline detection in RAM\n";
-    result_cpp += "    if (phys < 0x200000u) { // Within 2MB main RAM\n";
-    result_cpp += "        uint32_t instr = (uint32_t)rdram[phys] | "
-                  "((uint32_t)rdram[phys+1] << 8) |\n";
-    result_cpp += "                         ((uint32_t)rdram[phys+2] << 16) | "
-                  "((uint32_t)rdram[phys+3] << 24);\n";
-    result_cpp += "        if (instr == 0x03E00008u) {\n";
-    result_cpp += "            return; // JR RA trampoline -- no-op return\n";
-    result_cpp += "        }\n";
-    result_cpp += "    }\n\n";
-
-    // Step 7: Rate-limited fallback logging
-    result_cpp += "    // 7. Unknown target -- rate-limited log (don't crash)\n";
-    result_cpp += "    static std::unordered_map<uint32_t, uint32_t> s_unknownHits;\n";
-    result_cpp += "    auto& hitCount = s_unknownHits[addr];\n";
-    result_cpp += "    if (hitCount < 5) {\n";
-    result_cpp += "        fmt::print(stderr, \"[DISPATCH] Unknown target: "
-                  "0x{:08X} (RA=0x{:08X}, phys=0x{:08X})\\n\",\n";
-    result_cpp += "                   addr, ctx->r[31], phys);\n";
-    result_cpp += "    } else if (hitCount == 5) {\n";
-    result_cpp += "        fmt::print(stderr, \"[DISPATCH] Unknown target: "
-                  "0x{:08X} -- suppressing further logs\\n\", addr);\n";
-    result_cpp += "    }\n";
-    result_cpp += "    hitCount++;\n";
-    result_cpp += "}\n";
+    // Main dispatch function -- body lives in dispatch_emitter.cpp so the
+    // unmapped-target policy it encodes can be pinned by tests.
+    result_cpp += ps1recomp::emitDispatchBody();
 
     std::ofstream out(output_path);
     if (!out) {
