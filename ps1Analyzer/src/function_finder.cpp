@@ -120,14 +120,15 @@ void FunctionFinder::findFunctions(const ElfParser& elf) {
     // Pass 2: ELF symbol table
     addSymbolFunctions(elf);
 
-    // Pass 3 & 4: Heuristic scans on .text section
+    // Pass 3, 4 & 5: Heuristic scans on .text section
     const Section* text = elf.getTextSection();
     if (text != nullptr && text->data != nullptr && text->size >= 4) {
         scanJALTargets(*text);
         scanPrologues(*text);
+        scanJumpArrays(*text);
     }
 
-    // Pass 5: Compute sizes from sorted addresses
+    // Pass 6: Compute sizes from sorted addresses
     if (text != nullptr) {
         computeBoundaries(*text);
     }
@@ -217,7 +218,176 @@ void FunctionFinder::scanPrologues(const Section& text) {
     }
 }
 
-// Pass 5: Compute Boundaries
+// Pass 5: Computed Jump Arrays
+
+/// How far back the operands of the computed jump are traced.
+static constexpr uint32_t kJumpArrayTraceWindow = 16;
+/// A slot has to hold at least `jr $ra` and its delay slot to be a function.
+static constexpr uint32_t kJumpArrayMinSlot = 8;
+/// Above this a "slot size" is far likelier to be a mis-traced shift.
+static constexpr uint32_t kJumpArrayMaxSlot = 1024;
+
+/// Register the slots of an array of bodies reached by a computed jump.
+///
+/// A switch does not always dispatch through a table of pointers. The other
+/// shape -- the one Crash's memcpy and its decompressor use -- computes the
+/// target address arithmetically:
+///
+///     lui   $t, hi(base)
+///     addiu $t, $t, lo(base)    ; base is a .text address, not a table
+///     sll   $i, $idx, k         ; scale the index by the slot size
+///     addu  $t, $t, $i
+///     jr    $t
+///
+/// There is no table anywhere to read: the target is `base + idx * 2^k`, and
+/// each slot is a body of its own. Nothing else in the binary points at those
+/// bodies -- no `jal`, no stack prologue -- so without this pass the function
+/// ahead of the array simply extends over all of them, and every branch that
+/// lands in one becomes a dispatch to an address nobody emitted.
+///
+/// What separates a slot that is a *function* from a slot that is a *label* is
+/// whether it returns on its own. The same computed jump also builds jump
+/// islands (`bgez $zero, far_label` + delay slot in each slot), and those
+/// belong to the function around them. Requiring `jr $ra` inside the slot
+/// keeps the islands out.
+void FunctionFinder::scanJumpArrays(const Section& text) {
+    const uint32_t numInstructions = text.size / 4;
+    if (numInstructions < 4) {
+        return;
+    }
+
+    auto wordAt = [&](uint32_t addr) {
+        return readInstruction(text, addr - text.vaddr);
+    };
+
+    // `reg` holds a LUI (+ ADDIU) constant at instruction `from`, walking back.
+    // Any other write to it first means the value is not a link-time constant.
+    auto traceConstant = [&](uint32_t reg, uint32_t from, uint32_t& out) {
+        int32_t addend = 0;
+        const uint32_t stop =
+            (from >= kJumpArrayTraceWindow) ? from - kJumpArrayTraceWindow : 0;
+        for (uint32_t j = from + 1; j-- > stop;) {
+            const uint32_t instr = readInstruction(text, j * 4);
+            if (!mips::writesRegister(instr, reg)) {
+                continue;
+            }
+            const uint32_t op = mips::getOpcode(instr);
+            if (op == mips::OP_LUI) {
+                out = ((instr & 0xFFFFu) << 16) + static_cast<uint32_t>(addend);
+                return true;
+            }
+            if ((op == mips::OP_ADDIU || op == mips::OP_ADDI) &&
+                mips::getRs(instr) == reg) {
+                addend = mips::getImm16(instr);
+                continue;
+            }
+            return false;
+        }
+        return false;
+    };
+
+    // `reg` is an index scaled by a left shift; the shift amount is the slot
+    // size, which is the whole point of the pattern.
+    auto traceShift = [&](uint32_t reg, uint32_t from, uint32_t& shamt) {
+        const uint32_t stop =
+            (from >= kJumpArrayTraceWindow) ? from - kJumpArrayTraceWindow : 0;
+        for (uint32_t j = from + 1; j-- > stop;) {
+            const uint32_t instr = readInstruction(text, j * 4);
+            if (!mips::writesRegister(instr, reg)) {
+                continue;
+            }
+            if (mips::getOpcode(instr) != mips::OP_SPECIAL ||
+                mips::getFunction(instr) != mips::FUNC_SLL) {
+                return false;
+            }
+            shamt = mips::getShamt(instr);
+            return shamt > 0;
+        }
+        return false;
+    };
+
+    auto returnsWithin = [&](uint32_t addr, uint32_t slot) {
+        for (uint32_t off = 0; off + 4 <= slot; off += 4) {
+            if (!text.containsAddress(addr + off)) {
+                return false;
+            }
+            if (mips::isJR_RA(wordAt(addr + off))) {
+                return true;
+            }
+        }
+        return false;
+    };
+
+    const uint32_t textEnd = text.vaddr + text.size;
+
+    for (uint32_t i = 1; i < numInstructions; ++i) {
+        const uint32_t jr = readInstruction(text, i * 4);
+        if (!mips::isJR(jr) || mips::getRs(jr) == mips::REG_RA) {
+            continue;
+        }
+
+        // ADDU $target, $base, $scaled -- either operand may be the base.
+        const uint32_t targetReg = mips::getRs(jr);
+        const uint32_t stop =
+            (i >= kJumpArrayTraceWindow) ? i - kJumpArrayTraceWindow : 0;
+        uint32_t base = 0;
+        uint32_t shamt = 0;
+        bool matched = false;
+        for (uint32_t j = i; j-- > stop;) {
+            const uint32_t instr = readInstruction(text, j * 4);
+            if (!mips::writesRegister(instr, targetReg)) {
+                continue;
+            }
+            if (j == 0 || mips::getOpcode(instr) != mips::OP_SPECIAL ||
+                mips::getFunction(instr) != mips::FUNC_ADDU) {
+                break;
+            }
+            const uint32_t lhs = mips::getRs(instr);
+            const uint32_t rhs = mips::getRt(instr);
+            matched =
+                (traceConstant(lhs, j - 1, base) && traceShift(rhs, j - 1, shamt)) ||
+                (traceConstant(rhs, j - 1, base) && traceShift(lhs, j - 1, shamt));
+            break;
+        }
+        if (!matched) {
+            continue;
+        }
+
+        const uint32_t slot = 1u << shamt;
+        if (slot < kJumpArrayMinSlot || slot > kJumpArrayMaxSlot ||
+            !text.containsAddress(base) || !returnsWithin(base, slot)) {
+            continue;
+        }
+
+        // Never run past an entry point another pass already found: that one
+        // is better evidence than this arithmetic.
+        uint32_t limit = textEnd;
+        for (const auto& f : m_functions) {
+            if (f.address > base && f.address < limit) {
+                limit = f.address;
+            }
+        }
+
+        for (uint32_t n = 0;; ++n) {
+            const uint32_t addr = base + n * slot;
+            if (addr >= limit || !text.containsAddress(addr)) {
+                break;
+            }
+            if (n > 0) {
+                // The array ends where a slot stops returning, and a slot that
+                // begins on a delay slot is the tail of the one before it.
+                if (!returnsWithin(addr - slot, slot) ||
+                    mips::hasDelaySlot(wordAt(addr - 4))) {
+                    break;
+                }
+            }
+            addFunction(addr, fmt::format("func_{:08X}", addr),
+                        FunctionSource::JumpArray);
+        }
+    }
+}
+
+// Pass 6: Compute Boundaries
 
 void FunctionFinder::computeBoundaries(const Section& text) {
     // Sort functions by address

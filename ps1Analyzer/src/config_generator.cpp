@@ -87,6 +87,7 @@ static toml::value buildConfig(const ElfParser& elf,
                 case FunctionSource::EntryPoint: f["source"] = "entry_point"; break;
                 case FunctionSource::JALTarget:  f["source"] = "jal_target"; break;
                 case FunctionSource::Prologue:   f["source"] = "prologue"; break;
+                case FunctionSource::JumpArray:  f["source"] = "jump_array"; break;
                 default:                         f["source"] = "heuristic"; break;
             }
 

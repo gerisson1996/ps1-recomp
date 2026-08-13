@@ -6,6 +6,7 @@
 #include <ps1recomp/elf_parser.h>
 #include <elfio/elfio.hpp>
 #include <cstdio>
+#include <fmt/format.h>
 #include <fstream>
 
 using namespace ps1recomp;
@@ -34,6 +35,44 @@ static uint32_t makeADDIU_SP(int16_t imm) {
 static uint32_t makeADDIU(uint32_t rs, uint32_t rt, int16_t imm) {
     return (mips::OP_ADDIU << 26) | (rs << 21) | (rt << 16)
          | (static_cast<uint16_t>(imm) & 0xFFFF);
+}
+
+static uint32_t makeLUI(uint32_t rt, uint16_t imm) {
+    return (mips::OP_LUI << 26) | (rt << 16) | imm;
+}
+
+static uint32_t makeSLL(uint32_t rd, uint32_t rt, uint32_t shamt) {
+    return (mips::OP_SPECIAL << 26) | (rt << 16) | (rd << 11) | (shamt << 6)
+         | mips::FUNC_SLL;
+}
+
+static uint32_t makeADDU(uint32_t rd, uint32_t rs, uint32_t rt) {
+    return (mips::OP_SPECIAL << 26) | (rs << 21) | (rt << 16) | (rd << 11)
+         | mips::FUNC_ADDU;
+}
+
+static uint32_t makeJR(uint32_t rs) {
+    return (mips::OP_SPECIAL << 26) | (rs << 21) | mips::FUNC_JR;
+}
+
+// BGEZ $zero, target -- an unconditional PC-relative branch
+static uint32_t makeBGEZ(uint32_t pc, uint32_t target) {
+    const int16_t off = static_cast<int16_t>(
+        (static_cast<int32_t>(target) - static_cast<int32_t>(pc + 4)) / 4);
+    return (mips::OP_REGIMM << 26) | (1u << 16)
+         | (static_cast<uint16_t>(off) & 0xFFFF);
+}
+
+/// The dispatcher half of a computed jump into a code array:
+///   lui $t0, hi(base) / addiu $t0, $t0, lo(base) / sll $t1, $a0, k /
+///   addu $t0, $t0, $t1 / jr $t0 / nop
+static void writeJumpArrayDispatch(std::vector<uint32_t>& code, uint32_t base,
+                                   uint32_t shamt) {
+    code[0] = makeLUI(8, static_cast<uint16_t>(base >> 16));
+    code[1] = makeADDIU(8, 8, static_cast<int16_t>(base & 0xFFFF));
+    code[2] = makeSLL(9, 4, shamt);
+    code[3] = makeADDU(8, 8, 9);
+    code[4] = makeJR(8);
 }
 
 // Helper: write LE 32-bit word to buffer
@@ -269,6 +308,96 @@ TEST(FunctionFinder, DetectsProloguePatterns) {
 
     // Should detect at least 2 functions (entry point + prologue at +0x20)
     EXPECT_GE(finder.getFunctionCount(), 2u);
+
+    cleanupFile(path);
+}
+
+// Function Finder -- Computed Jump Arrays
+
+TEST(FunctionFinder, DetectsComputedJumpArraySlots) {
+    const std::string path = "/tmp/ps1recomp_test_ff_jump_array.elf";
+
+    // `jr $t0` with $t0 = 0x80010020 + idx*8. Each 8-byte slot returns on its
+    // own, so each is a function -- and nothing else in the image points at
+    // them. The prologue at +0x38 caps the array.
+    std::vector<uint32_t> code(18, makeNOP());
+    writeJumpArrayDispatch(code, 0x80010020, 3);
+    code[8]  = makeJR_RA();          // slot 0 at +0x20
+    code[10] = makeJR_RA();          // slot 1 at +0x28
+    code[12] = makeJR_RA();          // slot 2 at +0x30
+    code[14] = makeADDIU_SP(-16);    // next function at +0x38
+    code[16] = makeJR_RA();
+
+    createElfWithCode(path, code);
+
+    ElfParser elf;
+    ASSERT_TRUE(elf.load(path));
+
+    FunctionFinder finder;
+    finder.findFunctions(elf);
+
+    for (uint32_t addr : {0x80010020u, 0x80010028u, 0x80010030u}) {
+        auto* fn = finder.findByAddress(addr);
+        ASSERT_NE(fn, nullptr) << fmt::format("no entry at 0x{:08X}", addr);
+        EXPECT_EQ(fn->source, FunctionSource::JumpArray);
+        EXPECT_EQ(fn->size, 8u);
+    }
+
+    cleanupFile(path);
+}
+
+TEST(FunctionFinder, JumpIslandsAreNotEntryPoints) {
+    const std::string path = "/tmp/ps1recomp_test_ff_jump_island.elf";
+
+    // Same computed jump, but each slot is `bgez $zero, far` + delay slot --
+    // a jump island, which belongs to the function around it. No slot
+    // returns, so none of them is a function.
+    std::vector<uint32_t> code(18, makeNOP());
+    writeJumpArrayDispatch(code, 0x80010020, 3);
+    code[8]  = makeBGEZ(0x80010020, 0x80010040);
+    code[10] = makeBGEZ(0x80010028, 0x80010040);
+    code[12] = makeBGEZ(0x80010030, 0x80010040);
+    code[16] = makeJR_RA();
+
+    createElfWithCode(path, code);
+
+    ElfParser elf;
+    ASSERT_TRUE(elf.load(path));
+
+    FunctionFinder finder;
+    finder.findFunctions(elf);
+
+    EXPECT_EQ(finder.findByAddress(0x80010020), nullptr);
+    EXPECT_EQ(finder.findByAddress(0x80010028), nullptr);
+    EXPECT_EQ(finder.findByAddress(0x80010030), nullptr);
+
+    cleanupFile(path);
+}
+
+TEST(FunctionFinder, JumpArrayStopsAtADelaySlot) {
+    const std::string path = "/tmp/ps1recomp_test_ff_jump_array_tail.elf";
+
+    // The last slot is longer than the nominal stride, so `base + 2*8` lands
+    // on the delay slot of its `jr $ra`. That word is not an entry point and
+    // the array ends there.
+    std::vector<uint32_t> code(18, makeNOP());
+    writeJumpArrayDispatch(code, 0x80010020, 3);
+    code[8]  = makeJR_RA();          // slot 0 at +0x20
+    code[10] = makeADDIU(0, 2, 1);   // slot 1 at +0x28 runs long
+    code[11] = makeJR_RA();
+    // code[12] at +0x30 is that JR's delay slot, not a slot start
+
+    createElfWithCode(path, code);
+
+    ElfParser elf;
+    ASSERT_TRUE(elf.load(path));
+
+    FunctionFinder finder;
+    finder.findFunctions(elf);
+
+    ASSERT_NE(finder.findByAddress(0x80010020), nullptr);
+    ASSERT_NE(finder.findByAddress(0x80010028), nullptr);
+    EXPECT_EQ(finder.findByAddress(0x80010030), nullptr);
 
     cleanupFile(path);
 }

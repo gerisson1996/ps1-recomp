@@ -24,11 +24,16 @@ constexpr uint32_t OP_BEQ = 0x04;
 constexpr uint32_t OP_BNE = 0x05;
 constexpr uint32_t OP_BLEZ = 0x06;
 constexpr uint32_t OP_BGTZ = 0x07;
+constexpr uint32_t OP_ADDI = 0x08;
 constexpr uint32_t OP_ADDIU = 0x09;
+constexpr uint32_t OP_LUI = 0x0F;
 
 // SPECIAL function codes (bits 5-0)
+constexpr uint32_t FUNC_SLL = 0x00;
 constexpr uint32_t FUNC_JR = 0x08;
 constexpr uint32_t FUNC_JALR = 0x09;
+constexpr uint32_t FUNC_ADDU = 0x21;
+constexpr uint32_t FUNC_SUBU = 0x23;
 
 // Register numbers
 constexpr uint32_t REG_SP = 29;
@@ -39,6 +44,7 @@ inline uint32_t getOpcode(uint32_t instr) { return (instr >> 26) & 0x3F; }
 inline uint32_t getRs(uint32_t instr) { return (instr >> 21) & 0x1F; }
 inline uint32_t getRt(uint32_t instr) { return (instr >> 16) & 0x1F; }
 inline uint32_t getRd(uint32_t instr) { return (instr >> 11) & 0x1F; }
+inline uint32_t getShamt(uint32_t instr) { return (instr >> 6) & 0x1F; }
 inline uint32_t getFunction(uint32_t instr) { return instr & 0x3F; }
 inline int16_t getImm16(uint32_t instr) {
   return static_cast<int16_t>(instr & 0xFFFF);
@@ -92,6 +98,14 @@ inline bool isBranch(uint32_t instr) {
          op == OP_REGIMM;
 }
 
+/// Does `instr` carry a branch delay slot? True for every control transfer:
+/// the word that follows one is never a function entry point, it is that
+/// instruction's delay slot.
+inline bool hasDelaySlot(uint32_t instr) {
+  return isBranch(instr) || isJ(instr) || isJAL(instr) || isJR(instr) ||
+         (getOpcode(instr) == OP_SPECIAL && getFunction(instr) == FUNC_JALR);
+}
+
 /// Compute a PC-relative branch target: PC + 4 + (signed imm16 << 2)
 inline uint32_t branchTarget(uint32_t pc, uint32_t instr) {
   return pc + 4 + (static_cast<uint32_t>(static_cast<int32_t>(getImm16(instr)))
@@ -143,6 +157,7 @@ enum class FunctionSource {
   Symbol,     // From ELF symbol table (STT_FUNC)
   JALTarget,  // Target of a JAL instruction
   Prologue,   // Detected by ADDIU $sp, $sp, -N pattern
+  JumpArray,  // Slot of a computed jump into an array of fixed-size bodies
 };
 
 // FunctionInfo
@@ -215,6 +230,7 @@ private:
   void addSymbolFunctions(const ElfParser &elf);
   void scanJALTargets(const Section &text);
   void scanPrologues(const Section &text);
+  void scanJumpArrays(const Section &text);
   void computeBoundaries(const Section &text);
 
   // Helpers
