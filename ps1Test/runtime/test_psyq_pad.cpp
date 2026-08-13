@@ -97,6 +97,32 @@ TEST_F(PsyqPadTest, PadReadPressedBitsAreCleared) {
   EXPECT_EQ(ctx.r[V0], expected);
 }
 
+// Ground truth verified directly against the Crash Bandicoot (SCUS-94900)
+// retail binary: `PadUpdate` at VA 0x800167A4 loops the port index in $s1 and
+// picks the half with `bnez $s1, 0x80016818` before a delay-slot `srl
+// $v1,$v0,0x10` -- port 0 (s1==0) falls through to `andi $v1,$v0,0xffff`
+// (low half), port 1 (s1!=0) keeps the `srl` result (high half). This
+// matches CRASH_BANDICOOT_RECOMP.md Sec 2.1's account of the reference
+// implementation's "wrong halfword" trap (port 0 must be the low 16 bits),
+// and confirms our packing already has it right -- this test pins that so a
+// future change to hle_libetc_PadRead can't silently swap the halves.
+TEST_F(PsyqPadTest, PadReadPort0IsLowHalfPerRetailPadUpdateDisassembly) {
+  input.press(input::BTN_CROSS, 0);  // port 0 (low half)
+  input.press(input::BTN_SQUARE, 1); // port 1 (high half)
+  hle_libetc_PadRead(&ctx);
+
+  uint16_t lowHalf = static_cast<uint16_t>(ctx.r[V0] & 0xFFFFu);
+  uint16_t highHalf = static_cast<uint16_t>((ctx.r[V0] >> 16) & 0xFFFFu);
+
+  // CROSS (port 0) must land in the low half, not the high half.
+  EXPECT_EQ(lowHalf, static_cast<uint16_t>(0xFFFFu & ~input::BTN_CROSS));
+  EXPECT_NE(highHalf, static_cast<uint16_t>(0xFFFFu & ~input::BTN_CROSS));
+
+  // SQUARE (port 1) must land in the high half, not the low half.
+  EXPECT_EQ(highHalf, static_cast<uint16_t>(0xFFFFu & ~input::BTN_SQUARE));
+  EXPECT_NE(lowHalf, static_cast<uint16_t>(0xFFFFu & ~input::BTN_SQUARE));
+}
+
 TEST_F(PsyqPadTest, PadReadReflectsRelease) {
   input.press(input::BTN_CIRCLE, 0);
   hle_libetc_PadRead(&ctx);
