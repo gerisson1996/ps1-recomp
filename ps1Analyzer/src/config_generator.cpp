@@ -4,6 +4,7 @@
 #include "ps1recomp/config_generator.h"
 #include "ps1recomp/elf_parser.h"
 #include "ps1recomp/function_finder.h"
+#include "ps1recomp/psyq_hle_allowlist.h"
 #include "ps1recomp/psyq_signatures.h"
 
 #include <fstream>
@@ -88,6 +89,7 @@ static toml::value buildConfig(const ElfParser& elf,
                 case FunctionSource::JALTarget:  f["source"] = "jal_target"; break;
                 case FunctionSource::Prologue:   f["source"] = "prologue"; break;
                 case FunctionSource::JumpArray:  f["source"] = "jump_array"; break;
+                case FunctionSource::LinearSweep: f["source"] = "linear_sweep"; break;
                 default:                         f["source"] = "heuristic"; break;
             }
 
@@ -143,14 +145,22 @@ static toml::value buildConfig(const ElfParser& elf,
     // `<library>_<basename>` identifier the recompiler will use to look up
     // the C++ HLE stub. Only emitted when the `library` field is filled
     // (i.e., the match came from the hash-based pass).
+    //
+    // `hle` only goes true for names the runtime registry actually answers
+    // for. Recognising a PsyQ routine is not the same as having an HLE body
+    // for it: marking one true without the body makes ps1Recomp emit a
+    // `psyq_dispatch` the registry aborts on the first time it is called. The
+    // rest stay in the config as identification and get recompiled from the
+    // game's own MIPS, which is always a correct answer.
     {
         toml::array hle;
         for (const auto& m : matcher.getMatches()) {
             if (m.library.empty()) continue;
+            const std::string name = fmt::format("{}_{}", m.library, m.name);
             toml::table f;
             f["address"]   = hexAddr(m.address);
-            f["hle"]       = true;
-            f["name"]      = fmt::format("{}_{}", m.library, m.name);
+            f["hle"]       = psyqHleIsImplemented(name);
+            f["name"]      = name;
             f["library"]   = m.library;
             f["subsystem"] = PsyQMatcher::subsystemName(m.subsystem);
             f["stub_type"] = PsyQMatcher::stubTypeName(m.stubType);

@@ -5,6 +5,7 @@ add_library(ps1Analyzer_lib
     src/elf_parser.cpp
     src/function_finder.cpp
     src/psyq_signatures.cpp
+    src/psyq_hle_allowlist.cpp
     src/config_generator.cpp
     src/disc_reader.cpp
     src/overlay_scanner.cpp
