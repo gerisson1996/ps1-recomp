@@ -8,6 +8,7 @@ add_library(ps1Recomp_lib
     src/overlay_handler.cpp
     src/hle_emitter.cpp
     src/dispatch_emitter.cpp
+    src/jump_analysis.cpp
 )
 
 target_include_directories(ps1Recomp_lib
