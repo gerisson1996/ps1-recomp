@@ -91,6 +91,29 @@ TEST(ComputedCodeJump, AscendingFormWalksForwardFromTheBase) {
   EXPECT_EQ(targets.back(), 0x80034078u);
 }
 
+// The other in-function form, at func_80037D50 in the same binary: the base
+// addresses a table of `bgez $zero, ...` branches, each followed by its delay
+// slot, so the index is scaled by 8 rather than 4.
+TEST(ComputedCodeJump, EightByteSlotTableUsesTheShiftAsStride) {
+  constexpr uint32_t kFn = 0x80037D50;
+  constexpr uint32_t kBase = 0x80037ED4;
+  constexpr size_t kJrIdx = (0x80037E9Cu - kFn) / 4;
+
+  std::vector<uint32_t> f((0x8003864Cu - kFn) / 4, kNop);
+  f[kJrIdx - 4] = lui(1, kBase >> 16);
+  f[kJrIdx - 3] = addiu(1, 1, static_cast<uint16_t>(kBase & 0xFFFFu));
+  f[kJrIdx - 2] = sll(2, 2, 3); // sll $v0, $v0, 3
+  f[kJrIdx - 1] = addu(1, 1, 2);
+  f[kJrIdx] = jr(1);
+
+  auto targets = detectComputedCodeJump(f, kJrIdx, kFn);
+
+  ASSERT_FALSE(targets.empty());
+  EXPECT_EQ(targets[0], kBase);
+  EXPECT_EQ(targets[1], kBase + 8); // stride 8, not 4
+  EXPECT_LT(targets.back(), 0x8003864Cu);
+}
+
 TEST(ComputedCodeJump, BaseOutsideTheFunctionIsRejected) {
   // A computed address pointing at another function is a call, not a local
   // branch -- resolving it to a goto would jump across function bodies.

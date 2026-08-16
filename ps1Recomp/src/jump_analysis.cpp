@@ -74,15 +74,20 @@ detectComputedCodeJump(const std::vector<uint32_t> &instrs, size_t jr_idx,
   if (base < funcAddr || base >= funcEnd || (base & 3u) != 0)
     return {};
 
-  // Step 4: the scaled index comes from SLL $rs, $ridx, 2; the SLTIU/SLTI
-  // guarding that index carries the entry count.
+  // Step 4: the scaled index comes from SLL $rs, $ridx, N.  Shift 2 lands on
+  // single instructions (an unrolled loop); shift 3 lands on 8-byte slots,
+  // used when the table holds a branch plus its delay slot rather than the
+  // work itself.  The SLTIU/SLTI guarding that index carries the entry count.
   int sll_idx = -1;
   uint8_t index_reg = 0;
+  uint32_t stride = 0;
   for (int j = op_idx - 1; j >= 0 && j >= (int)jr_idx - 24; j--) {
     Instruction inst = MipsDecoder::decode(instrs[j]);
-    if (inst.id == InstrId::SLL && inst.rd == scaled_reg && inst.shamt == 2) {
+    if (inst.id == InstrId::SLL && inst.rd == scaled_reg &&
+        (inst.shamt == 2 || inst.shamt == 3)) {
       sll_idx = j;
       index_reg = inst.rt;
+      stride = 1u << inst.shamt;
       break;
     }
   }
@@ -101,11 +106,12 @@ detectComputedCodeJump(const std::vector<uint32_t> &instrs, size_t jr_idx,
     }
   }
 
-  // Step 5: enumerate base -/+ i*4, clipped to the function.  Extra entries
-  // are inert -- they only become reachable if the computed value matches.
+  // Step 5: enumerate base -/+ i*stride, clipped to the function.  Extra
+  // entries are inert -- they only become reachable if the computed value
+  // matches.
   std::vector<uint32_t> targets;
   for (uint32_t i = 0; i < max_entries; i++) {
-    uint32_t off = i * 4;
+    uint32_t off = i * stride;
     if (descending && off > base - funcAddr)
       break;
     uint32_t target = descending ? base - off : base + off;
