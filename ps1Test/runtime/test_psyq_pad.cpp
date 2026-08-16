@@ -82,19 +82,45 @@ TEST_F(PsyqPadTest, PadReadIdleReturnsAllOnes) {
   EXPECT_EQ(ctx.r[V0], 0xFFFFFFFFu);
 }
 
+// PadRead's halves are active-low but byte-swapped relative to
+// `InputController`'s bit layout, so a pressed button clears exactly the bit
+// named by the PsyQ `PADxxx` constant.  These are the SDK's own values -- a
+// game doing `if (!(pad & PADstart))` only works if we honour them.
+constexpr uint16_t PAD_START = 0x0800;  // BTN_START  (controller bit 3)
+constexpr uint16_t PAD_RDOWN = 0x0040;  // BTN_CROSS  (controller bit 14)
+constexpr uint16_t PAD_RLEFT = 0x0080;  // BTN_SQUARE (controller bit 15)
+constexpr uint16_t PAD_RRIGHT = 0x0020; // BTN_CIRCLE (controller bit 13)
+
 TEST_F(PsyqPadTest, PadReadPressedBitsAreCleared) {
-  // Press CROSS on port 0 -> bit 14 cleared in low half.
+  // Press CROSS on port 0 -> PADRdown cleared in the low half.
   input.press(input::BTN_CROSS, 0);
   hle_libetc_PadRead(&ctx);
-  uint32_t expected = 0xFFFFFFFFu & ~static_cast<uint32_t>(input::BTN_CROSS);
-  EXPECT_EQ(ctx.r[V0], expected);
+  EXPECT_EQ(ctx.r[V0], 0xFFFFFFFFu & ~static_cast<uint32_t>(PAD_RDOWN));
 
-  // Add START on port 1 -> bit 3 of high half cleared.
+  // Add START on port 1 -> PADstart cleared in the high half.
   input.press(input::BTN_START, 1);
   hle_libetc_PadRead(&ctx);
-  expected = (~static_cast<uint32_t>(input::BTN_CROSS) & 0xFFFFu) |
-             ((~static_cast<uint32_t>(input::BTN_START) & 0xFFFFu) << 16);
+  uint32_t expected = static_cast<uint32_t>(0xFFFFu & ~PAD_RDOWN) |
+                      (static_cast<uint32_t>(0xFFFFu & ~PAD_START) << 16);
   EXPECT_EQ(ctx.r[V0], expected);
+}
+
+// Ground truth from the working reference (CrashBandicoot-Launcher,
+// `RecompOne.Runtime/Bios/BiosB.cs::PadRead`): it byte-swaps each half
+// (`(s >> 8) | (s << 8)`) before handing the word to the game, keeping the
+// active-low sense.  Measured against our own build: without the swap,
+// pressing START moved controller bit 3, the game read it as R1, and
+// `title_state` never left the title screen; with it, the guest's decoded pad
+// global reads 0x0800 -- PADstart -- and the title advances.
+TEST_F(PsyqPadTest, PadReadUsesPsyqButtonMaskNotControllerBitLayout) {
+  input.press(input::BTN_START, 0);
+  hle_libetc_PadRead(&ctx);
+
+  const uint16_t low = static_cast<uint16_t>(ctx.r[V0] & 0xFFFFu);
+  EXPECT_EQ(static_cast<uint16_t>(~low & 0xFFFFu), PAD_START);
+  // The raw controller bit must NOT be what the game sees.
+  EXPECT_NE(static_cast<uint16_t>(~low & 0xFFFFu),
+            static_cast<uint16_t>(input::BTN_START));
 }
 
 // Ground truth verified directly against the Crash Bandicoot (SCUS-94900)
@@ -115,19 +141,18 @@ TEST_F(PsyqPadTest, PadReadPort0IsLowHalfPerRetailPadUpdateDisassembly) {
   uint16_t highHalf = static_cast<uint16_t>((ctx.r[V0] >> 16) & 0xFFFFu);
 
   // CROSS (port 0) must land in the low half, not the high half.
-  EXPECT_EQ(lowHalf, static_cast<uint16_t>(0xFFFFu & ~input::BTN_CROSS));
-  EXPECT_NE(highHalf, static_cast<uint16_t>(0xFFFFu & ~input::BTN_CROSS));
+  EXPECT_EQ(lowHalf, static_cast<uint16_t>(0xFFFFu & ~PAD_RDOWN));
+  EXPECT_NE(highHalf, static_cast<uint16_t>(0xFFFFu & ~PAD_RDOWN));
 
   // SQUARE (port 1) must land in the high half, not the low half.
-  EXPECT_EQ(highHalf, static_cast<uint16_t>(0xFFFFu & ~input::BTN_SQUARE));
-  EXPECT_NE(lowHalf, static_cast<uint16_t>(0xFFFFu & ~input::BTN_SQUARE));
+  EXPECT_EQ(highHalf, static_cast<uint16_t>(0xFFFFu & ~PAD_RLEFT));
+  EXPECT_NE(lowHalf, static_cast<uint16_t>(0xFFFFu & ~PAD_RLEFT));
 }
 
 TEST_F(PsyqPadTest, PadReadReflectsRelease) {
   input.press(input::BTN_CIRCLE, 0);
   hle_libetc_PadRead(&ctx);
-  EXPECT_EQ(ctx.r[V0] & 0xFFFFu,
-            static_cast<uint32_t>(0xFFFFu & ~input::BTN_CIRCLE));
+  EXPECT_EQ(ctx.r[V0] & 0xFFFFu, static_cast<uint32_t>(0xFFFFu & ~PAD_RRIGHT));
 
   input.release(input::BTN_CIRCLE, 0);
   hle_libetc_PadRead(&ctx);

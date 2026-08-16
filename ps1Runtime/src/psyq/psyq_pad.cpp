@@ -120,9 +120,15 @@ void hle_libetc_PadGetState(recomp_context *ctx) {
 }
 
 //  PadRead(n) -- packed 32-bit pad word: port 1 in the low half, port 2 in
-//  the high half.  Each half is the PsyQ active-low button mask (bit clear
-//  = pressed) which is exactly what `InputController::buttonState()`
-//  already returns; no extra inversion needed.
+//  the high half.  Each half stays active-low (bit clear = pressed), but the
+//  two bytes within a half are swapped relative to `InputController`'s
+//  layout: the pad reports its halfword big-endian on the wire, and libetc
+//  hands that through untouched.  Games therefore see SELECT..LEFT in the
+//  HIGH byte and L2..SQUARE in the LOW byte.
+//
+//  Without the swap every button lands 8 bits away from where the game looks
+//  -- pressing START (bit 3) reads as R1 (bit 11) -- so input silently does
+//  the wrong thing instead of nothing.
 //
 //  Whether the module is "active" doesn't gate reading on real libetc --
 //  PadRead just samples the most recent VBlank snapshot -- so we ignore
@@ -130,8 +136,12 @@ void hle_libetc_PadGetState(recomp_context *ctx) {
 void hle_libetc_PadRead(recomp_context *ctx) {
   auto *input = inputOf(ctx);
 
-  uint16_t port1 = input ? input->buttonState(0) : 0xFFFF;
-  uint16_t port2 = input ? input->buttonState(1) : 0xFFFF;
+  auto byteSwap = [](uint16_t v) -> uint16_t {
+    return static_cast<uint16_t>((v >> 8) | (v << 8));
+  };
+
+  uint16_t port1 = byteSwap(input ? input->buttonState(0) : 0xFFFF);
+  uint16_t port2 = byteSwap(input ? input->buttonState(1) : 0xFFFF);
 
   // Refresh direct-mode buffers as a side-effect -- see PadInitDirect.
   writePadBuffer(ctx, input, g_state.buf1Addr, 0);
