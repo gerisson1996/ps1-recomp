@@ -19,6 +19,22 @@ static std::string hexAddr(uint32_t addr) {
     return fmt::format("0x{:08X}", addr);
 }
 
+/// Will the runtime do anything with this match, or is it only a name?
+///
+/// Recognising a PsyQ routine buys nothing on its own. A match is only worth
+/// taking the function away from the recompiler when something downstream
+/// answers for it: the hash-based pass hands the name to the PsyQ registry, so
+/// it has to be registered there; the older name/prefix passes carry no
+/// library and are served by the `[[stubs]]` path instead.
+///
+/// An unhandled match stays an ordinary function -- listed in `[[functions]]`
+/// and translated from the game's own MIPS. Dropping it from both places is
+/// how it used to vanish from the build entirely.
+static bool matchIsHandled(const PsyQMatch& m) {
+    if (m.library.empty()) return true; // legacy [[stubs]] path
+    return psyqHleIsImplemented(fmt::format("{}_{}", m.library, m.name));
+}
+
 // Build TOML Tree
 
 static toml::value buildConfig(const ElfParser& elf,
@@ -65,10 +81,11 @@ static toml::value buildConfig(const ElfParser& elf,
     {
         toml::array funcs;
         for (const auto& fi : finder.getFunctions()) {
-            // Skip PsyQ functions (they go into stubs/skips/passthroughs)
+            // Skip PsyQ functions the runtime takes over (they go into
+            // stubs/skips/passthroughs/hle_functions instead)
             bool isPsyQ = false;
             for (const auto& m : matcher.getMatches()) {
-                if (m.address == fi.address) {
+                if (m.address == fi.address && matchIsHandled(m)) {
                     isPsyQ = true;
                     break;
                 }
@@ -104,6 +121,7 @@ static toml::value buildConfig(const ElfParser& elf,
     {
         toml::array stubs;
         for (const auto* m : matcher.getStubs()) {
+            if (!matchIsHandled(*m)) continue;
             toml::table s;
             s["name"]      = m->name;
             s["address"]   = hexAddr(m->address);
@@ -118,6 +136,7 @@ static toml::value buildConfig(const ElfParser& elf,
     {
         toml::array skips;
         for (const auto* m : matcher.getSkips()) {
+            if (!matchIsHandled(*m)) continue;
             toml::table s;
             s["name"]    = m->name;
             s["address"] = hexAddr(m->address);
@@ -131,6 +150,7 @@ static toml::value buildConfig(const ElfParser& elf,
     {
         toml::array pass;
         for (const auto* m : matcher.getPassthroughs()) {
+            if (!matchIsHandled(*m)) continue;
             toml::table p;
             p["name"]    = m->name;
             p["address"] = hexAddr(m->address);

@@ -122,6 +122,18 @@ inline bool isLoad(uint32_t instr) {
 /// Conservative: covers R-type rd writes, loads, and the immediate ALU forms.
 bool writesRegister(uint32_t instr, uint32_t reg);
 
+/// Is `instr` an encoding the R3000A actually implements?
+///
+/// A whitelist, not a decoder. Every heuristic that walks over unclaimed bytes
+/// has to answer "is this code at all?", and the only cheap answer that does
+/// not fabricate functions out of data is: every word in the candidate has to
+/// be a real instruction. One reserved encoding invalidates the whole slice.
+///
+/// Deliberately excludes COP1 (the PS1 has no FPU), COP3, the MIPS-II/III
+/// opcodes the R3000A never had, and the reserved SPECIAL function codes --
+/// those are the encodings data most often lands on.
+bool isKnownInstruction(uint32_t instr);
+
 } // namespace mips
 
 /// Find where a function actually ends.
@@ -148,16 +160,33 @@ bool writesRegister(uint32_t instr, uint32_t reg);
 uint32_t refineFunctionEnd(const std::vector<uint32_t> &words,
                            uint32_t startAddr, uint32_t maxEndAddr);
 
-
+/// Could the slice starting at `words[0]` be a function body?
+///
+/// The gate in front of the linear sweep, and the reason the sweep does not
+/// turn data into functions. Two conditions, both required:
+///
+///  - every word up to the terminator is a known instruction. Data that
+///    happens to decode as something plausible almost always hits a reserved
+///    encoding within a few words;
+///  - a legitimate terminator appears *before* `maxEndAddr`. A slice that runs
+///    into the next known entry point without ever returning is not a
+///    function -- it is the middle of something, or it is not code.
+///
+/// @param words       Instruction words, starting at `startAddr`.
+/// @param startAddr   Virtual address of `words[0]`.
+/// @param maxEndAddr  The next known entry point, or the end of the section.
+bool validatesAsFunction(const std::vector<uint32_t> &words, uint32_t startAddr,
+                         uint32_t maxEndAddr);
 
 // Function Detection Source
 
 enum class FunctionSource {
-  EntryPoint, // ELF entry point
-  Symbol,     // From ELF symbol table (STT_FUNC)
-  JALTarget,  // Target of a JAL instruction
-  Prologue,   // Detected by ADDIU $sp, $sp, -N pattern
-  JumpArray,  // Slot of a computed jump into an array of fixed-size bodies
+  EntryPoint,  // ELF entry point
+  Symbol,      // From ELF symbol table (STT_FUNC)
+  JALTarget,   // Target of a JAL instruction
+  Prologue,    // Detected by ADDIU $sp, $sp, -N pattern
+  JumpArray,   // Slot of a computed jump into an array of fixed-size bodies
+  LinearSweep, // Validated slice of text no other pass claimed
 };
 
 // FunctionInfo
@@ -222,8 +251,17 @@ public:
   void recomputeBoundaries(const ElfParser &elf);
 
 private:
+  /// A computed-jump array whose slots do not return: bodies of a switch that
+  /// only bounce back into the function they belong to.
+  struct JumpIsland {
+    uint32_t base;
+    uint32_t end;
+    uint32_t slot;
+  };
+
   std::vector<FunctionInfo> m_functions;
   std::set<uint32_t> m_jalTargets;
+  std::vector<JumpIsland> m_jumpIslands;
 
   // Detection passes
   void addEntryPoint(const ElfParser &elf);
@@ -231,10 +269,15 @@ private:
   void scanJALTargets(const Section &text);
   void scanPrologues(const Section &text);
   void scanJumpArrays(const Section &text);
+  void linearSweep(const Section &text);
   void computeBoundaries(const Section &text);
 
   // Helpers
   bool hasFunction(uint32_t addr) const;
+
+  /// Does `addr` (holding `word`) sit on a jump-island array the jump-array
+  /// pass traced and refused? Those slots are not function entry points.
+  bool isJumpIslandSlot(uint32_t addr, uint32_t word) const;
 
   /// Read a 32-bit little-endian instruction from section data.
   static uint32_t readInstruction(const Section &sec, uint32_t offset);
