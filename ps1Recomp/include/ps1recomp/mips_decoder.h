@@ -153,6 +153,10 @@ public:
 
     /// Get human-readable name for a category
     static std::string_view categoryName(InstrCategory cat);
+
+    /// The GPR this instruction writes, or -1 when it writes none (stores,
+    /// branches, MULT/DIV, COP moves to the coprocessor).
+    static int destGPR(const Instruction &inst);
 };
 
 // Register Names

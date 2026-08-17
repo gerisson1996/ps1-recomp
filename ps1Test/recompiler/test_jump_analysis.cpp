@@ -7,6 +7,7 @@
 // screen accepted START.
 
 #include <gtest/gtest.h>
+#include <ps1recomp/instruction_emitter.h>
 #include <ps1recomp/jump_analysis.h>
 
 #include <algorithm>
@@ -114,6 +115,37 @@ TEST(ComputedCodeJump, EightByteSlotTableUsesTheShiftAsStride) {
   EXPECT_LT(targets.back(), 0x8003864Cu);
 }
 
+// func_80033878+0x54C in the same binary. The offset is built as
+// `sll $s3,$at,2; addu $s3,$s3,$at; sll $s3,$s3,1` -- x10, not the x4 the
+// first shift alone reads as. With x4 the table stopped at 0x80033DD8 and the
+// game dispatched 0x80033DD0, an address in the middle of the function.
+TEST(ComputedCodeJump, ShiftAndAddChainGivesTheWholeStride) {
+  constexpr uint32_t kFn = 0x80033878;
+  constexpr uint32_t kBase = 0x80033DF8;
+  constexpr size_t kJrIdx = (0x80033D8Cu - kFn) / 4;
+
+  std::vector<uint32_t> f((0x80033EF8u - kFn) / 4, kNop);
+  f[kJrIdx - 7] = sltiu(18, 1, 9);
+  f[kJrIdx - 6] = lui(20, kBase >> 16);
+  f[kJrIdx - 5] = addiu(20, 20, static_cast<uint16_t>(kBase & 0xFFFFu));
+  f[kJrIdx - 4] = sll(19, 1, 2);   // sll  $s3, $at, 2   -> x4
+  f[kJrIdx - 3] = addu(19, 19, 1); // addu $s3, $s3, $at -> x5
+  f[kJrIdx - 2] = sll(19, 19, 1);  // sll  $s3, $s3, 1   -> x10
+  f[kJrIdx - 1] = subu(20, 20, 19);
+  f[kJrIdx] = jr(20);
+
+  auto targets = detectComputedCodeJump(f, kJrIdx, kFn);
+
+  // The index is masked to a multiple of 4 before scaling, so only every
+  // other step lands on an instruction boundary -- the odd ones are dropped.
+  EXPECT_NE(std::find(targets.begin(), targets.end(), 0x80033DD0u),
+            targets.end());
+  for (uint32_t t : targets)
+    EXPECT_EQ(t & 3u, 0u) << std::hex << t;
+  EXPECT_EQ(targets.front(), kBase);
+  EXPECT_EQ(targets[1], kBase - 20);
+}
+
 TEST(ComputedCodeJump, BaseOutsideTheFunctionIsRejected) {
   // A computed address pointing at another function is a call, not a local
   // branch -- resolving it to a goto would jump across function bodies.
@@ -138,4 +170,95 @@ TEST(ComputedCodeJump, TableShapedJumpIsLeftToTheTableDetector) {
   std::vector<uint32_t> f(64, kNop);
   f[32] = jr(8);
   EXPECT_TRUE(detectComputedCodeJump(f, 32, kFuncAddr).empty());
+}
+
+// Hijacked return address
+//
+// Ground truth is func_80033878 in the same binary, the PsyQ decompressor.
+// Its prologue stashes $s0-$ra in the scratchpad and sets $ra = 0x80033C28,
+// an address inside itself.  The `jr $s4` at 0x80033EEC enters one of the
+// out-of-line copy stubs at 0x80033EF8+n*32; each stub ends in `jr $ra` and
+// so lands back at 0x80033C28, which is where the epilogue restores the
+// scratchpad.  Emitting the `jr $s4` as dispatch-then-return skips that
+// epilogue: $sp keeps the copy loop's source pointer, and $s0/$s1 keep its
+// working state.  Measured: func_80029B0C entered with sp=0x801FFD98 and
+// returned with sp=0x8018AF4C, after which func_80025A60 spun 91M times on
+// a loop counter that came back as garbage.
+
+namespace {
+constexpr uint32_t kDecompressor = 0x80033878;
+constexpr uint32_t kHijackedRa = 0x80033C28;
+constexpr size_t kDecompressorLen = (0x80033EF8u - kDecompressor) / 4;
+
+// lui $ra, hi / addiu $ra, $ra, lo, then a `jr $s4` into the copy stubs.
+std::vector<uint32_t> hijackedRaFunction(uint32_t raTarget) {
+  std::vector<uint32_t> f(kDecompressorLen, kNop);
+  f[0] = lui(31, raTarget >> 16);
+  f[1] = addiu(31, 31, static_cast<uint16_t>(raTarget & 0xFFFFu));
+  f[(0x80033EECu - kDecompressor) / 4] = jr(20); // jr $s4
+  return f;
+}
+} // namespace
+
+TEST(HijackedReturnAddress, ConstantRaInsideTheFunctionIsReported) {
+  auto targets =
+      detectInternalReturnTargets(hijackedRaFunction(kHijackedRa), kDecompressor);
+
+  ASSERT_EQ(targets.size(), 1u);
+  EXPECT_EQ(targets.front(), kHijackedRa);
+}
+
+TEST(HijackedReturnAddress, RaPointingOutsideTheFunctionIsARealCall) {
+  // `lui/addiu $ra` to another function is the ordinary "call this, come back
+  // there" idiom -- the plain return is correct and must stay.
+  auto targets = detectInternalReturnTargets(
+      hijackedRaFunction(0x80041000u), kDecompressor);
+  EXPECT_TRUE(targets.empty());
+}
+
+TEST(HijackedReturnAddress, FunctionWithoutARaConstantReportsNothing) {
+  std::vector<uint32_t> f(kDecompressorLen, kNop);
+  f[0] = lui(8, 0x8003); // $t0, not $ra
+  f[1] = addiu(8, 8, 0x3C28);
+  EXPECT_TRUE(detectInternalReturnTargets(f, kDecompressor).empty());
+}
+
+TEST(HijackedReturnAddress, IndirectJumpResumesInsteadOfReturning) {
+  ps1recomp::InstructionEmitter em;
+  ps1recomp::RecompFunction f;
+  f.name = "func_80033878";
+  f.address = kDecompressor;
+  f.instructions = hijackedRaFunction(kHijackedRa);
+  f.isLabelTarget.assign(f.instructions.size(), false);
+  f.size = static_cast<uint32_t>(f.instructions.size() * 4);
+
+  const std::string out = em.emitFunction(f);
+
+  // The stub's `jr $ra` comes back as a C++ return, so the dispatch must not
+  // return with it -- it has to resume at the hijacked address.
+  EXPECT_NE(out.find("if (ctx->r31 == 0x80033C28u) goto L_80033C28;"),
+            std::string::npos)
+      << out;
+
+  // And that label has to be the real one at 0x80033C28, not a dispatch stub
+  // synthesised by the undefined-label post-pass.
+  EXPECT_EQ(out.find("recomp_dispatch(rdram, ctx, 0x80033C28)"),
+            std::string::npos)
+      << out;
+}
+
+TEST(HijackedReturnAddress, OrdinaryIndirectJumpStillReturns) {
+  ps1recomp::InstructionEmitter em;
+  ps1recomp::RecompFunction f;
+  f.name = "plain";
+  f.address = kDecompressor;
+  f.instructions = hijackedRaFunction(0x80041000u); // $ra points elsewhere
+  f.isLabelTarget.assign(f.instructions.size(), false);
+  f.size = static_cast<uint32_t>(f.instructions.size() * 4);
+
+  const std::string out = em.emitFunction(f);
+
+  EXPECT_NE(out.find("JUMP_INDIRECT(ctx, ctx->r20);"), std::string::npos)
+      << out;
+  EXPECT_EQ(out.find("ctx->r31 =="), std::string::npos) << out;
 }

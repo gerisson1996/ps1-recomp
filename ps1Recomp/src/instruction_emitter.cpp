@@ -2,6 +2,7 @@
 // Translates decoded MIPS I instructions to C++ code using runtime macros
 
 #include "ps1recomp/instruction_emitter.h"
+#include "ps1recomp/jump_analysis.h"
 #include <fmt/format.h>
 #include <set>
 
@@ -60,39 +61,7 @@ static std::string u32(const std::string &val) {
 // that the preceding branch/jump reads for its condition/target.
 
 static int getDestGPR(const Instruction &inst) {
-  if (inst.isNOP() || !inst.isValid())
-    return -1;
-
-  switch (inst.category) {
-  case InstrCategory::ALU:
-    // R-type (ADD..SLTU, SLL..SRAV) writes rd; I-type writes rt
-    if (inst.id <= InstrId::SLTU ||
-        (inst.id >= InstrId::SLL && inst.id <= InstrId::SRAV))
-      return inst.rd;
-    return inst.rt;
-  case InstrCategory::Memory:
-    return inst.isLoad() ? static_cast<int>(inst.rt) : -1;
-  case InstrCategory::MulDiv:
-    if (inst.id == InstrId::MFHI || inst.id == InstrId::MFLO)
-      return inst.rd;
-    return -1; // MULT, DIV etc. write HI/LO, not GPR
-  case InstrCategory::COP0:
-    if (inst.id == InstrId::MFC0)
-      return inst.rt;
-    return -1;
-  case InstrCategory::GTE:
-    if (inst.id == InstrId::MFC2 || inst.id == InstrId::CFC2)
-      return inst.rt;
-    return -1;
-  case InstrCategory::Jump:
-    if (inst.id == InstrId::JAL)
-      return 31;
-    if (inst.id == InstrId::JALR)
-      return inst.rd;
-    return -1;
-  default:
-    return -1;
-  }
+  return MipsDecoder::destGPR(inst);
 }
 
 // Replace all occurrences of `from` with `to` in `str`, but only when the
@@ -571,6 +540,32 @@ std::string InstructionEmitter::emitFunction(const RecompFunction &func) const {
     }
   }
 
+  // A function that points $ra back into itself resumes there when the block
+  // it jumped into runs its `jr $ra`. Those addresses need labels too -- they
+  // are reached from the dispatch below, not from any branch.
+  const std::vector<uint32_t> raResume =
+      detectInternalReturnTargets(func.instructions, func.address);
+  for (uint32_t target : raResume) {
+    classifyTarget(target);
+  }
+
+  // `jr $rx` for such a function must not return with the dispatch: the block
+  // it entered ends in `jr $ra`, which is a resume, not a return. Returning
+  // anyway unwinds past this function's epilogue, so whatever it stashed on
+  // entry -- $sp included -- is never restored.
+  auto indirectJump = [&](uint8_t rs) {
+    if (raResume.empty())
+      return fmt::format("JUMP_INDIRECT(ctx, {});", reg(rs));
+    std::string code =
+        fmt::format("JUMP_INDIRECT_RESUME(ctx, {});\n", reg(rs));
+    for (uint32_t target : raResume) {
+      code += fmt::format("    if (ctx->r31 == 0x{:08X}u) goto {};\n", target,
+                          label(target));
+    }
+    code += "    return;";
+    return code;
+  };
+
   // Pass 2: Emit code
   // Track reachability: after JR/JALR + delay slot, treat subsequent
   // words as data comments until the next branch target label.
@@ -608,7 +603,8 @@ std::string InstructionEmitter::emitFunction(const RecompFunction &func) const {
     // If this JR $rx has a detected jump table, replace JUMP_INDIRECT
     // with a static switch/goto over the known target addresses.
     // A JUMP_INDIRECT fallback is kept for safety.
-    if (inst.id == InstrId::JR && inst.rs != 31 && !func.jumpTables.empty()) {
+    if (inst.id == InstrId::JR && inst.rs != 31) {
+      bool tabled = false;
       for (const auto &jt : func.jumpTables) {
         if (jt.jrInstrIdx == i && !jt.targets.empty()) {
           std::string sw;
@@ -619,12 +615,15 @@ std::string InstructionEmitter::emitFunction(const RecompFunction &func) const {
             sw += fmt::format("    if (_sw_target == 0x{:08X}u) goto {};\n",
                               target, label(target));
           }
-          sw += fmt::format("    JUMP_INDIRECT(ctx, {}); // fallback\n", reg(inst.rs));
+          sw += fmt::format("    // fallback\n    {}\n", indirectJump(inst.rs));
           sw += "    }";
           code = sw;
+          tabled = true;
           break;
         }
       }
+      if (!tabled)
+        code = indirectJump(inst.rs);
     }
 
     // Handle branch delay slots: if this instruction has a delay slot,

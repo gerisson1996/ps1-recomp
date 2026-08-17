@@ -189,4 +189,12 @@ inline uint32_t indirect_trace_ra_filter() {
     recomp_dispatch(rdram, ctx, static_cast<uint32_t>(addr));                  \
     return;                                                                    \
   } while (0)
+// Same dispatch, but the emitter tests $ra afterwards: the block being jumped
+// into ends in `jr $ra`, and the calling function has pointed $ra back into
+// itself, so control resumes there instead of unwinding to the caller.
+#define JUMP_INDIRECT_RESUME(ctx, addr)                                        \
+  do {                                                                         \
+    PS1_INDIRECT_TRACE_HOOK(ctx, addr);                                        \
+    recomp_dispatch(rdram, ctx, static_cast<uint32_t>(addr));                  \
+  } while (0)
 #define COP0_RFE(ctx) /* NOP for now */

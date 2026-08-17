@@ -14,6 +14,9 @@ namespace ps1recomp {
 inline constexpr uint32_t kJumpTableFallbackEntries = 64;
 /// Upper limit accepted from a bounds check, as a sanity clamp.
 inline constexpr uint32_t kJumpTableMaxEntries = 4096;
+/// Largest per-entry stride accepted from the scaling chain. Real ones are a
+/// handful of instructions wide; anything past this is a misread pattern.
+inline constexpr uint32_t kJumpTableMaxStride = 256;
 
 /// Resolve a `jr` whose target is *computed* from a code address inside the
 /// same function, rather than loaded from a table (Duff's device).
@@ -41,5 +44,26 @@ inline constexpr uint32_t kJumpTableMaxEntries = 4096;
 std::vector<uint32_t>
 detectComputedCodeJump(const std::vector<uint32_t> &instrs, size_t jr_idx,
                        uint32_t funcAddr);
+
+/// Find the addresses a function loads into `$ra` as a constant pointing back
+/// into itself -- a *hijacked* return address.
+///
+///   LUI   $ra, hi              ; $ra = address inside THIS function
+///   ADDIU $ra, $ra, lo
+///   ...
+///   JR    $rx                  ; enters an out-of-line block
+///
+/// The block ends in `jr $ra`, so control resumes at that address rather than
+/// returning to the caller.  Emitting the `jr $rx` as a plain dispatch-then-
+/// return unwinds past the function's epilogue, so the registers it stashed on
+/// entry are never restored and the caller sees the block's working values.
+///
+/// \param instrs    the function's instruction words
+/// \param funcAddr  address of the function's first instruction
+/// \returns the in-function `$ra` constants, in program order, deduplicated;
+///          empty when the function never hijacks `$ra`.
+std::vector<uint32_t>
+detectInternalReturnTargets(const std::vector<uint32_t> &instrs,
+                            uint32_t funcAddr);
 
 } // namespace ps1recomp

@@ -572,4 +572,40 @@ std::string_view cop0Name(uint8_t reg) {
     return s_cop0Names[reg];
 }
 
+int MipsDecoder::destGPR(const Instruction &inst) {
+    if (inst.isNOP() || !inst.isValid())
+        return -1;
+
+    switch (inst.category) {
+    case InstrCategory::ALU:
+        // R-type (ADD..SLTU, SLL..SRAV) writes rd; I-type writes rt
+        if (inst.id <= InstrId::SLTU ||
+            (inst.id >= InstrId::SLL && inst.id <= InstrId::SRAV))
+            return inst.rd;
+        return inst.rt;
+    case InstrCategory::Memory:
+        return inst.isLoad() ? static_cast<int>(inst.rt) : -1;
+    case InstrCategory::MulDiv:
+        if (inst.id == InstrId::MFHI || inst.id == InstrId::MFLO)
+            return inst.rd;
+        return -1; // MULT, DIV etc. write HI/LO, not GPR
+    case InstrCategory::COP0:
+        if (inst.id == InstrId::MFC0)
+            return inst.rt;
+        return -1;
+    case InstrCategory::GTE:
+        if (inst.id == InstrId::MFC2 || inst.id == InstrId::CFC2)
+            return inst.rt;
+        return -1;
+    case InstrCategory::Jump:
+        if (inst.id == InstrId::JAL)
+            return 31;
+        if (inst.id == InstrId::JALR)
+            return inst.rd;
+        return -1;
+    default:
+        return -1;
+    }
+}
+
 } // namespace ps1recomp
