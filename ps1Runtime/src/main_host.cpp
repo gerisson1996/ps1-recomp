@@ -26,6 +26,9 @@
 #include <runtime/emuptr.h>
 #include <runtime/gpu/gpu.h>
 #include <runtime/gpu/renderer_opengl.h>
+#include <algorithm>
+#include <execinfo.h>
+#include <pthread.h>
 #include <runtime/input/input.h>
 #include <runtime/mdec/mdec.h>
 #include <runtime/memory.h>
@@ -119,6 +122,20 @@ static constexpr uint32_t SCANLINES_PER_FRAME = 263;  // NTSC
 // SIGTERM/SIGINT raises this so `tools/smoke_test.py` (and `timeout`) can
 // stop the runtime gracefully -- giving the main loop a chance to dump VRAM
 // before the OS reaps us.
+// Stall sampler (PS1_STALL_SAMPLE)
+// No gdb/perf here, but every recompiled MIPS function is a real C++ function
+// with an exported symbol, so a backtrace taken on the game thread names the
+// func_XXXXXXXX it is stuck in.  A watchdog thread pokes SIGPROF at it and
+// prints what the handler captured.
+static void *g_stallFrames[32];
+static int g_stallDepth = 0;
+static std::atomic<bool> g_stallCaptured{false};
+
+static void stallSampler(int) {
+  g_stallDepth = backtrace(g_stallFrames, 32);
+  g_stallCaptured.store(true, std::memory_order_release);
+}
+
 static volatile std::sig_atomic_t g_shutdown_requested = 0;
 static void onTerminate(int) { g_shutdown_requested = 1; }
 
@@ -566,6 +583,15 @@ int main(int argc, char *argv[]) {
   // BSS mirror (`vblankCounterMirror`): when set via `[bss_mirrors]`, also
   // write-through to a PS1 RAM address so recompiled MIPS code that polls
   // the legacy slot directly keeps working -- see comment block above.
+  const bool watchGlobals = std::getenv("PS1_WATCH_GLOBALS") != nullptr;
+  const uint32_t autoStartVsync =
+      std::getenv("PS1_AUTO_START")
+          ? std::strtoul(std::getenv("PS1_AUTO_START"), nullptr, 10)
+          : 0;
+  const uint32_t autoStartHold =
+      std::getenv("PS1_AUTO_START_HOLD")
+          ? std::strtoul(std::getenv("PS1_AUTO_START_HOLD"), nullptr, 10)
+          : 8;
   std::thread vblankThread([&]() {
     using namespace std::chrono;
     const auto period = microseconds(16667); // ~60 Hz
@@ -579,6 +605,29 @@ int main(int argc, char *argv[]) {
           true, std::memory_order_release);
       if (vblankCounterMirror != 0) {
         memory.write32(vblankCounterMirror, newCount);
+      }
+      if (autoStartVsync != 0) {
+        if (newCount == autoStartVsync) {
+          input.press(ps1::input::BTN_START, 0);
+          fmt::print(stderr, "[auto] START press @vsync={}\n", newCount);
+        } else if (newCount == autoStartVsync + autoStartHold) {
+          input.release(ps1::input::BTN_START, 0);
+          fmt::print(stderr, "[auto] START release @vsync={}\n", newCount);
+        }
+      }
+      if (watchGlobals) {
+        fmt::print(stderr,
+                   "[watch] vsync={} ticks={} frames_elapsed={} vblank={} "
+                   "title_state={} pad0=0x{:08X} raw=0x{:04X} "
+                   "exit=0x{:08X} p={:08X} p32={:04X}\n",
+                   newCount, memory.read32(0x80034520u),
+                   memory.read32(0x80060E04u), memory.read32(0x800549F0u),
+                   memory.read32(0x800618D4u), memory.read32(0x8005E71Cu),
+                   input.buttonState(0), memory.read32(0x80061994u),
+                   memory.read32(0x8005791Cu),
+                   memory.read32(0x8005791Cu)
+                       ? memory.read16(memory.read32(0x8005791Cu) + 32)
+                       : 0xFFFF);
       }
       gpu.snapshotDisplayBuffer();
       bios.updatePadBuffers();
@@ -605,6 +654,33 @@ int main(int argc, char *argv[]) {
     gameFinished.store(true, std::memory_order_release);
     gameThreadDone.store(true, std::memory_order_release);
   });
+
+  if (const char *everyMs = std::getenv("PS1_STALL_SAMPLE")) {
+    struct sigaction sa {};
+    sa.sa_handler = stallSampler;
+    sigemptyset(&sa.sa_mask);
+    sa.sa_flags = SA_RESTART;
+    sigaction(SIGPROF, &sa, nullptr);
+    const long periodMs = std::max(200L, std::strtol(everyMs, nullptr, 10));
+    pthread_t gt = gameThread.native_handle();
+    std::thread([gt, periodMs, &gameFinished]() {
+      while (!gameFinished.load(std::memory_order_acquire)) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(periodMs));
+        g_stallCaptured.store(false, std::memory_order_release);
+        if (pthread_kill(gt, SIGPROF) != 0)
+          return;
+        for (int i = 0; i < 200 && !g_stallCaptured.load(std::memory_order_acquire); ++i)
+          std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        if (!g_stallCaptured.load(std::memory_order_acquire))
+          continue;
+        char **syms = backtrace_symbols(g_stallFrames, g_stallDepth);
+        fmt::print(stderr, "[stall] depth={}\n", g_stallDepth);
+        for (int i = 0; i < g_stallDepth && i < 14; ++i)
+          fmt::print(stderr, "[stall]   #{} {}\n", i, syms ? syms[i] : "?");
+        free(syms);
+      }
+    }).detach();
+  }
 
   bool running = true;
   while (running) {
