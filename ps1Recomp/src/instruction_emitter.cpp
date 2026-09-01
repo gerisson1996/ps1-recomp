@@ -228,15 +228,18 @@ std::string InstructionEmitter::emitLoad(const Instruction &inst) const {
   auto offset = inst.imm16;
 
   switch (inst.id) {
+  // `read8`/`read16` return unsigned, so the cast is what carries the sign:
+  // without it LB/LH zero-extend and every negative byte or halfword in the
+  // game comes back as a large positive number.
   case InstrId::LB:
-    return assignReg(inst.rt,
-                     fmt::format("MEM_READ8(ctx, {} + {})", s32(base), offset));
+    return assignReg(inst.rt, fmt::format("(int8_t)MEM_READ8(ctx, {} + {})",
+                                          s32(base), offset));
   case InstrId::LBU:
     return assignReg(inst.rt, fmt::format("(uint8_t)MEM_READ8(ctx, {} + {})",
                                           s32(base), offset));
   case InstrId::LH:
-    return assignReg(
-        inst.rt, fmt::format("MEM_READ16(ctx, {} + {})", s32(base), offset));
+    return assignReg(inst.rt, fmt::format("(int16_t)MEM_READ16(ctx, {} + {})",
+                                          s32(base), offset));
   case InstrId::LHU:
     return assignReg(inst.rt, fmt::format("(uint16_t)MEM_READ16(ctx, {} + {})",
                                           s32(base), offset));
@@ -622,8 +625,39 @@ std::string InstructionEmitter::emitFunction(const RecompFunction &func) const {
           break;
         }
       }
-      if (!tabled)
-        code = indirectJump(inst.rs);
+      if (!tabled) {
+        // No table was recovered -- the index scaling is not visible near the
+        // jump (Crash's 0x80037D50 forms it with an SRL ~130 instructions
+        // back, so the linear pass reads a coefficient of 1 and bails).  The
+        // jump still lands on in-function code, and every branch target in
+        // this function already has a label, so match against those.
+        //
+        // This can only change behaviour for a value that is exactly one of
+        // this function's label addresses.  Such a value is in-function code,
+        // so jumping there is right -- and it is what the indirect dispatch
+        // cannot do, since no *function* starts at an interior address, which
+        // is why it aborts instead.  Anything else (a real function pointer,
+        // a return thunk) matches nothing and still takes the fallback.
+        std::string sw;
+        std::size_t n = 0;
+        for (std::size_t k = 0; k < labelTargets.size(); ++k) {
+          if (!labelTargets[k])
+            continue;
+          const uint32_t target = func.address + static_cast<uint32_t>(k) * 4;
+          sw += fmt::format("    if (_sw_target == 0x{:08X}u) goto {};\n",
+                            target, label(target));
+          ++n;
+        }
+        if (n == 0) {
+          code = indirectJump(inst.rs);
+        } else {
+          code = fmt::format("{{ // in-function labels ({} entries)\n"
+                             "    uint32_t _sw_target = static_cast<uint32_t>({});\n"
+                             "{}"
+                             "    // fallback\n    {}\n    }}",
+                             n, reg(inst.rs), sw, indirectJump(inst.rs));
+        }
+      }
     }
 
     // Handle branch delay slots: if this instruction has a delay slot,

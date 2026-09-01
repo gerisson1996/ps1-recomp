@@ -11,6 +11,12 @@
 namespace ps1recomp {
 
 /// Entries to assume when no bounds check is found next to the index.
+///
+/// Measured 2026-08-30: raising this to 1024 does NOT help Crash's
+/// 0x80037D50 (the missing target 0x80038030 sits *below* the detected base,
+/// and enumeration is one-directional) and it regressed the boot in 1 of 3
+/// runs.  The gap there is direction/base, not count -- do not raise this
+/// without a measurement that shows the extra entries are the ones needed.
 inline constexpr uint32_t kJumpTableFallbackEntries = 64;
 /// Upper limit accepted from a bounds check, as a sanity clamp.
 inline constexpr uint32_t kJumpTableMaxEntries = 4096;

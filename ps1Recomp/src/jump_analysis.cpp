@@ -145,6 +145,14 @@ detectComputedCodeJump(const std::vector<uint32_t> &instrs, size_t jr_idx,
   // matches.  A stride that is not a multiple of 4 puts some of them off an
   // instruction boundary; those the hardware could never reach, so drop them
   // rather than stopping -- the aligned ones after them are the real entries.
+  // Measured 2026-08-30: walking BOTH directions here (an ADDU is modulo 2^32,
+  // so a negative index reaches base - n*stride through it) does put
+  // 0x80038030 into the third table of Crash's 0x80037D50 -- and the abort
+  // there does not change, because the block that actually falls through is
+  // the one based at 0x80037D54, whose entries are 4 mod 8 and so can never
+  // hold it.  The gap is a base misdetected by +4, not the walk direction.
+  // Bidirectional walking also breaks ComputedCodeJump.* (4 tests), which pin
+  // the one-directional contract.  Fix the base before touching this.
   std::vector<uint32_t> targets;
   for (uint32_t i = 0; i < max_entries; i++) {
     uint32_t off = i * stride;
