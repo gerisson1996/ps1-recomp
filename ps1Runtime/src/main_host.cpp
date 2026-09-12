@@ -9,6 +9,7 @@
 #include <csignal>
 #include <execinfo.h>
 #include <sys/mman.h>
+#include <ucontext.h>
 #include <unistd.h>
 #include <cstdio>
 #include <cstdlib>
@@ -50,43 +51,196 @@ static ps1::spu::SPU *g_spu = nullptr;
 // Write guard (`PS1_WRITE_GUARD=<guest addr>[,<pages>]`)
 //
 // Makes a span of guest RAM read-only and reports the *host* stack of whoever
-// writes it first.  Unlike a polled canary or a printf probe, this costs
-// nothing until the illegal write happens, so it does not perturb the timing
-// of the bug it is hunting -- which matters here, because every active probe
-// tried so far suppressed the corruption instead of catching it.
+// writes it.  Unlike a polled canary or a printf probe, this costs nothing
+// until a write to the span happens, so it does not perturb the timing of the
+// bug it is hunting -- which matters here, because every active probe tried so
+// far suppressed the corruption instead of catching it.
 //
-// One-shot: the page is unprotected after the first report so the run
-// continues and the same write is not re-reported for every store.
+// N-shot.  The span is re-protected after each offending store, so legitimate
+// writers no longer consume the whole instrument before the interesting one
+// runs.  Re-arming works by letting the store retry with the x86 trap flag
+// set: the store completes, the resulting SIGTRAP re-protects the span.
+//
+// Reports are deduplicated by faulting host PC, so a writer in a loop is
+// reported once and counted thereafter.  Two budgets bound the cost:
+//   PS1_WRITE_GUARD_SHOTS=<n>   distinct PCs to report with a stack (def. 8)
+//   PS1_WRITE_GUARD_FAULTS=<n>  total faults before the guard gives up and
+//                               unprotects for good (def. 20000)
+//   PS1_WRITE_GUARD_BYTES=<n>   report only writes landing in the first <n>
+//                               bytes from the requested address.  mprotect
+//                               works a page at a time, so watching one word
+//                               inside a busy page otherwise drowns in its
+//                               neighbours' traffic (def. the whole span).
 // ---------------------------------------------------------------------------
 namespace {
 uint8_t *g_guardBase = nullptr;
 std::size_t g_guardLen = 0;
 uint8_t *g_guardRamBase = nullptr;
-volatile sig_atomic_t g_guardFired = 0;
 
-void guardSigsegv(int sig, siginfo_t *info, void *) {
-  uint8_t *fault = static_cast<uint8_t *>(info->si_addr);
-  if (fault < g_guardBase || fault >= g_guardBase + g_guardLen) {
-    // Not ours -- restore default so the real fault is not masked.
+constexpr int kGuardMaxPcs = 64;
+struct GuardWriter {
+  uintptr_t pc;
+  uint32_t firstOffset;
+  unsigned long count;
+  uint32_t lastValue; // word left behind by this writer's most recent store
+};
+GuardWriter g_guardWriters[kGuardMaxPcs];
+volatile sig_atomic_t g_guardWriterCount = 0;
+volatile sig_atomic_t g_guardStepping = 0;
+// Set by the SIGSEGV handler so the SIGTRAP handler, which runs once the
+// store has actually completed, can read back what was written.
+volatile sig_atomic_t g_guardPendingSlot = -1;
+uint8_t *g_guardPendingAddr = nullptr;
+unsigned long g_guardFaults = 0;
+unsigned g_guardShotLimit = 8;
+unsigned long g_guardFaultBudget = 20000;
+unsigned g_guardShots = 0;
+uint8_t *g_guardWatchLo = nullptr; // reported window inside the guarded span
+uint8_t *g_guardWatchHi = nullptr;
+unsigned long g_guardIgnored = 0;
+
+// Re-protect the span once the offending store has completed.  The SIGSEGV
+// handler sets the trap flag before returning, so exactly one guest
+// instruction runs before this fires.
+void guardSigtrap(int sig, siginfo_t * /*info*/, void *ctx) {
+  if (!g_guardStepping) {
     signal(sig, SIG_DFL);
     return;
   }
-  // Let the faulting store retry, then report.  write(2) and backtrace() are
-  // the async-signal-safe-ish pair; fmt/printf are not used here on purpose.
-  mprotect(g_guardBase, g_guardLen, PROT_READ | PROT_WRITE);
-  if (!g_guardFired) {
-    g_guardFired = 1;
-    char buf[128];
-    const uint32_t off = static_cast<uint32_t>(fault - g_guardRamBase);
-    int n = snprintf(buf, sizeof buf,
-                     "\n[WGUARD] escrita em 0x8%07X (phys 0x%X) -- pilha do host:\n",
-                     off, off);
-    ssize_t ignored = write(2, buf, n);
-    (void)ignored;
-    void *bt[32];
-    int frames = backtrace(bt, 32);
-    backtrace_symbols_fd(bt, frames, 2);
+  g_guardStepping = 0;
+  auto *uc = static_cast<ucontext_t *>(ctx);
+  uc->uc_mcontext.gregs[REG_EFL] &= ~static_cast<greg_t>(0x100);
+
+  const int slot = g_guardPendingSlot;
+  g_guardPendingSlot = -1;
+  if (slot >= 0 && g_guardPendingAddr != nullptr) {
+    uint32_t v;
+    memcpy(&v, g_guardPendingAddr, sizeof v);
+    g_guardWriters[slot].lastValue = v;
+    // A guest pointer outside the 2 MB of main RAM cannot be a valid target,
+    // so shout about it even when this writer's stack was already reported.
+    const uint32_t phys = v & 0x1FFFFFFFu;
+    if (v >= 0x80000000u && phys >= 0x200000u) {
+      char buf[128];
+      int n = snprintf(buf, sizeof buf,
+                       "[WGUARD] !! valor fora da RAM: 0x%08X escrito em "
+                       "0x8%07X por pc=%p\n",
+                       v, static_cast<uint32_t>(g_guardPendingAddr - g_guardRamBase),
+                       reinterpret_cast<void *>(g_guardWriters[slot].pc));
+      ssize_t ignored = write(2, buf, n);
+      (void)ignored;
+    }
   }
+  mprotect(g_guardBase, g_guardLen, PROT_READ);
+}
+
+// Census of everyone who wrote the span, in a form usable from a signal
+// handler.  The run that matters is the one that crashes, and a crash never
+// reaches the orderly shutdown path.
+void guardCensusToStderr() {
+  char buf[192];
+  int n = snprintf(buf, sizeof buf,
+                   "[WGUARD] censo: %d escritor(es), %lu falta(s), "
+                   "%lu fora da janela\n",
+                   static_cast<int>(g_guardWriterCount), g_guardFaults,
+                   g_guardIgnored);
+  ssize_t ignored = write(2, buf, n);
+  for (int i = 0; i < g_guardWriterCount; i++) {
+    n = snprintf(buf, sizeof buf,
+                 "[WGUARD]   pc=%p 1a em 0x8%07X x%lu ultimo=0x%08X\n",
+                 reinterpret_cast<void *>(g_guardWriters[i].pc),
+                 g_guardWriters[i].firstOffset, g_guardWriters[i].count,
+                 g_guardWriters[i].lastValue);
+    ignored = write(2, buf, n);
+  }
+  (void)ignored;
+}
+
+void guardSigsegv(int sig, siginfo_t *info, void *ctx) {
+  uint8_t *fault = static_cast<uint8_t *>(info->si_addr);
+  if (fault < g_guardBase || fault >= g_guardBase + g_guardLen) {
+    // Not ours -- this is the crash we are hunting, or an unrelated one.
+    // Report what the guard saw before the default action kills us.
+    guardCensusToStderr();
+    signal(sig, SIG_DFL);
+    return;
+  }
+  mprotect(g_guardBase, g_guardLen, PROT_READ | PROT_WRITE);
+
+  auto *uc = static_cast<ucontext_t *>(ctx);
+  const uintptr_t pc = static_cast<uintptr_t>(uc->uc_mcontext.gregs[REG_RIP]);
+  const uint32_t off = static_cast<uint32_t>(fault - g_guardRamBase);
+  g_guardFaults++;
+
+  if (fault < g_guardWatchLo || fault >= g_guardWatchHi) {
+    // Same page, different word.  Count it and re-arm without reporting.
+    g_guardIgnored++;
+    if (g_guardFaults < g_guardFaultBudget) {
+      uc->uc_mcontext.gregs[REG_EFL] |= static_cast<greg_t>(0x100);
+      g_guardStepping = 1;
+    }
+    return;
+  }
+
+  int slot = -1;
+  for (int i = 0; i < g_guardWriterCount; i++) {
+    if (g_guardWriters[i].pc == pc) {
+      slot = i;
+      break;
+    }
+  }
+  if (slot < 0 && g_guardWriterCount < kGuardMaxPcs) {
+    slot = g_guardWriterCount;
+    g_guardWriters[slot] = GuardWriter{pc, off, 0, 0};
+    g_guardWriterCount = slot + 1;
+
+    if (g_guardShots < g_guardShotLimit) {
+      g_guardShots++;
+      // write(2) and backtrace() are the async-signal-safe-ish pair; fmt and
+      // printf are deliberately not used here.
+      char buf[160];
+      int n = snprintf(buf, sizeof buf,
+                       "\n[WGUARD] #%u escrita em 0x8%07X (phys 0x%X) "
+                       "pc=%p -- pilha do host:\n",
+                       g_guardShots, off, off, reinterpret_cast<void *>(pc));
+      ssize_t ignored = write(2, buf, n);
+      (void)ignored;
+      void *bt[32];
+      int frames = backtrace(bt, 32);
+      backtrace_symbols_fd(bt, frames, 2);
+    }
+  }
+  if (slot >= 0) {
+    g_guardWriters[slot].count++;
+    g_guardPendingSlot = slot;
+    g_guardPendingAddr = fault;
+  }
+
+  if (g_guardFaults >= g_guardFaultBudget) {
+    const char msg[] = "[WGUARD] orcamento de faltas esgotado -- guarda desligada\n";
+    ssize_t ignored = write(2, msg, sizeof msg - 1);
+    (void)ignored;
+    return; // leave the span writable
+  }
+
+  // Re-arm: let the store retry, then trap on the next instruction.
+  uc->uc_mcontext.gregs[REG_EFL] |= static_cast<greg_t>(0x100);
+  g_guardStepping = 1;
+}
+
+// Called at shutdown so a run that caught several writers still reports the
+// full census, not only the ones whose stack fit in the shot budget.
+void dumpWriteGuard() {
+  if (g_guardBase == nullptr)
+    return;
+  mprotect(g_guardBase, g_guardLen, PROT_READ | PROT_WRITE);
+  if (g_guardWriterCount == 0) {
+    fmt::print(stderr,
+               "[WGUARD] nenhuma escrita na janela ({} falta(s) na pagina)\n",
+               g_guardFaults);
+    return;
+  }
+  guardCensusToStderr();
 }
 
 // Arming is deferred to `PS1_WRITE_GUARD_AT=<vsync>` so that boot-time writes
@@ -112,6 +266,13 @@ void installWriteGuard(uint8_t *ramPtr) {
   if (!spec || !*spec) return;
   if (const char *at = std::getenv("PS1_WRITE_GUARD_AT"))
     g_guardArmAt = std::strtoul(at, nullptr, 10);
+  if (const char *n = std::getenv("PS1_WRITE_GUARD_SHOTS"))
+    g_guardShotLimit = std::strtoul(n, nullptr, 10);
+  if (const char *n = std::getenv("PS1_WRITE_GUARD_FAULTS"))
+    g_guardFaultBudget = std::strtoul(n, nullptr, 10);
+  unsigned long watchBytes = 0;
+  if (const char *n = std::getenv("PS1_WRITE_GUARD_BYTES"))
+    watchBytes = std::strtoul(n, nullptr, 0);
   char *end = nullptr;
   const uint32_t guest = std::strtoul(spec, &end, 0);
   unsigned pages = 1;
@@ -127,6 +288,15 @@ void installWriteGuard(uint8_t *ramPtr) {
   g_guardRamBase = ramPtr;
   g_guardBase = aligned;
   g_guardLen = static_cast<std::size_t>(ps) * pages;
+  if (watchBytes > 0) {
+    g_guardWatchLo = want;
+    g_guardWatchHi = want + watchBytes;
+    if (g_guardWatchHi > g_guardBase + g_guardLen)
+      g_guardWatchHi = g_guardBase + g_guardLen;
+  } else {
+    g_guardWatchLo = g_guardBase;
+    g_guardWatchHi = g_guardBase + g_guardLen;
+  }
 
   struct sigaction sa {};
   sa.sa_sigaction = guardSigsegv;
@@ -134,11 +304,31 @@ void installWriteGuard(uint8_t *ramPtr) {
   sigemptyset(&sa.sa_mask);
   sigaction(SIGSEGV, &sa, nullptr);
 
+  struct sigaction st {};
+  st.sa_sigaction = guardSigtrap;
+  st.sa_flags = SA_SIGINFO;
+  sigemptyset(&st.sa_mask);
+  sigaction(SIGTRAP, &st, nullptr);
+
+  // The dispatcher aborts on an unmapped target, which is exactly the failure
+  // this guard is usually chasing.  Print the census on the way out.
+  struct sigaction sab {};
+  sab.sa_handler = [](int) {
+    guardCensusToStderr();
+    signal(SIGABRT, SIG_DFL);
+    raise(SIGABRT);
+  };
+  sigemptyset(&sab.sa_mask);
+  sigaction(SIGABRT, &sab, nullptr);
+
   fmt::print(stderr, "[WGUARD] alvo phys 0x{:X}..0x{:X} ({} pagina(s)), "
-                     "armar em vsync {}\n",
+                     "armar em vsync {}, {} tiro(s), {} falta(s), "
+                     "janela 0x{:X}..0x{:X}\n",
              static_cast<uint32_t>(g_guardBase - ramPtr),
              static_cast<uint32_t>(g_guardBase - ramPtr + g_guardLen), pages,
-             g_guardArmAt);
+             g_guardArmAt, g_guardShotLimit, g_guardFaultBudget,
+             static_cast<uint32_t>(g_guardWatchLo - ramPtr),
+             static_cast<uint32_t>(g_guardWatchHi - ramPtr));
   if (g_guardArmAt == 0)
     armWriteGuard();
 }
@@ -1221,6 +1411,7 @@ int main(int argc, char *argv[]) {
   }
   gpu.publishMetrics();
   ps1::metrics::dumpJson();
+  dumpWriteGuard();
 
   // Cleanup
 
