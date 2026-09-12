@@ -1,4 +1,5 @@
 #include "runtime/dma/dma.h"
+#include <array>
 #include "runtime/cdrom/cdrom_controller.h"
 #include "runtime/gpu/gpu.h"
 #include "runtime/mdec/mdec.h"
@@ -215,6 +216,13 @@ void DMA::executeBlockTransfer(uint32_t ch) {
 
   uint8_t *ram = mem_->ramPtr();
 
+  // Snapshot the CDROM sector before touching guest RAM, so the whole
+  // transfer sees one sector and the ready flag is consumed atomically.
+  std::array<uint8_t, ps1::cdrom::SECTOR_SIZE_RAW> payload{};
+  uint32_t payloadBytes = 0;
+  if (ch == CDROM_CH && !fromRam && cdrom_)
+    payloadBytes = cdrom_->takeSectorPayload(payload.data(), payload.size());
+
   for (uint32_t i = 0; i < totalWords; i++) {
     uint32_t physAddr = addr & 0x1FFFFC;
 
@@ -253,18 +261,15 @@ void DMA::executeBlockTransfer(uint32_t ch) {
 
       switch (ch) {
       case CDROM_CH:
-        if (cdrom_ && cdrom_->hasSectorReady()) {
-          const uint8_t *sector = cdrom_->getSectorBuffer();
-          uint32_t sectorSz = cdrom_->getSectorSize();
-          // Skip raw sector header to reach user data payload.
-          // Raw sector (2352 bytes): 12-sync + 4-header + 8-subheader + 2048-data
-          // sectorSize=2048 -> user data at offset 24
-          // sectorSize=2340 -> sub-header+data at offset 12
-          uint32_t dataOff = (sectorSz == 2048) ? 24 : 12;
-          uint32_t offset = dataOff + i * 4;
-          if (offset + 3 < 2352) {
-            word = sector[offset] | (sector[offset + 1] << 8) |
-                   (sector[offset + 2] << 16) | (sector[offset + 3] << 24);
+        // `payload` was taken once, before the loop: the CDROM state machine
+        // ticks on the render thread and drops the next sector on top of the
+        // controller's buffer, so reading it word by word here spliced two
+        // sectors together.
+        if (payloadBytes > 0) {
+          const uint32_t offset = i * 4;
+          if (offset + 3 < payloadBytes) {
+            word = payload[offset] | (payload[offset + 1] << 8) |
+                   (payload[offset + 2] << 16) | (payload[offset + 3] << 24);
           }
         }
         break;
@@ -283,10 +288,6 @@ void DMA::executeBlockTransfer(uint32_t ch) {
     }
 
     addr += step;
-  }
-
-  if (ch == CDROM_CH && cdrom_) {
-    cdrom_->clearSectorReady();
   }
 }
 

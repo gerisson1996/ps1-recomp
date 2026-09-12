@@ -1,5 +1,6 @@
 #include "bios_internal.h"
 #include "runtime/bios/bios.h"
+#include <array>
 #include "runtime/cdrom/cdrom_controller.h"
 #include "runtime/dma/dma.h"
 #include "runtime/gpu/gpu.h"
@@ -238,29 +239,30 @@ void Bios::triggerCdromEvent(uint8_t cdIntType) {
     // `CdReadCallback` (cdDataCb == 0), the drainPendingCallbacks pump
     // would dispatch nothing and ACK -- discarding the sector.  Copy it
     // ourselves to the destination CdRead stashed in psyq_state.
-    if (state.cdRemaining > 0 && state.cdDataCb == 0 &&
-        cdrom_->hasSectorReady() && state.cdDestPtr != 0) {
-      const uint8_t *sector = cdrom_->getSectorBuffer();
-      uint32_t sectorSz = cdrom_->getSectorSize();
-      // Raw sector (2352 bytes): 12-sync + 4-header + 8-subheader + data.
-      // sectorSize=2048 -> user data at +24; sectorSize=2340 -> +12.
-      uint32_t dataOff = (sectorSz == 2048) ? 24u : 12u;
-      uint32_t words = state.cdWordCount;
-      for (uint32_t i = 0; i < words; ++i) {
-        uint32_t off = dataOff + i * 4;
-        if (off + 3 >= 2352)
-          break;
-        uint32_t word = static_cast<uint32_t>(sector[off]) |
-                        (static_cast<uint32_t>(sector[off + 1]) << 8) |
-                        (static_cast<uint32_t>(sector[off + 2]) << 16) |
-                        (static_cast<uint32_t>(sector[off + 3]) << 24);
-        ctx_.mem->write32(state.cdDestPtr + i * 4, word);
+    if (state.cdRemaining > 0 && state.cdDataCb == 0 && state.cdDestPtr != 0) {
+      // Take the whole payload in one step.  The CDROM state machine ticks on
+      // the render thread and overwrites its sector buffer, so copying word by
+      // word out of `getSectorBuffer` used to splice two sectors together.
+      std::array<uint8_t, ps1::cdrom::SECTOR_SIZE_RAW> payload{};
+      const uint32_t got =
+          cdrom_->takeSectorPayload(payload.data(), payload.size());
+      if (got > 0) {
+        uint32_t words = state.cdWordCount;
+        for (uint32_t i = 0; i < words; ++i) {
+          uint32_t off = i * 4;
+          if (off + 3 >= got)
+            break;
+          uint32_t word = static_cast<uint32_t>(payload[off]) |
+                          (static_cast<uint32_t>(payload[off + 1]) << 8) |
+                          (static_cast<uint32_t>(payload[off + 2]) << 16) |
+                          (static_cast<uint32_t>(payload[off + 3]) << 24);
+          ctx_.mem->write32(state.cdDestPtr + i * 4, word);
+        }
+        state.cdDestPtr += words * 4;
+        state.cdRemaining -= 1;
+        if (state.cdRemaining == 0)
+          cdrom_->stopReading();
       }
-      state.cdDestPtr += words * 4;
-      state.cdRemaining -= 1;
-      cdrom_->clearSectorReady();
-      if (state.cdRemaining == 0)
-        cdrom_->stopReading();
     }
   }
 

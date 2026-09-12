@@ -11,6 +11,17 @@
  * runs on the SDL render thread.  IRQs raised from either thread are
  * funnelled through `interruptCallback` and ultimately queued for delivery
  * on the game thread by `Bios::queueCdromEvent` (Phase 3.3).
+ *
+ * Every public entry point takes `mtx_`, so the two threads cannot interleave
+ * inside the state machine.  The lock is recursive because the interrupt
+ * callback re-enters the controller when it fires on the game thread
+ * (`Bios::queueCdromEvent` drains inline there, and the drain reads the
+ * sector).  Consume a sector with `takeSectorPayload`, never by holding the
+ * pointer `getSectorBuffer` returns: `tick` memcpy's the next sector over
+ * that buffer, and a word-at-a-time reader used to splice two sectors
+ * together.  Measured in Crash: one NSF page in ~25 runs came out corrupt,
+ * the LZ decompressor then never reached its terminating count, and it wrote
+ * bytes until it had wrapped 2 MB of guest RAM.
  */
 
 #include <array>
@@ -18,6 +29,7 @@
 #include <deque>
 #include <functional>
 #include <initializer_list>
+#include <mutex>
 #include <vector>
 
 #include "runtime/cdrom/virtual_fs.h"
@@ -69,20 +81,49 @@ public:
   void tick(uint32_t cycles);
 
   // Interrupt check
-  bool hasInterrupt() const { return interruptFlag_ != 0; }
-  uint8_t interruptFlag() const { return interruptFlag_; }
+  bool hasInterrupt() const {
+    std::lock_guard<std::recursive_mutex> lk(mtx_);
+    return interruptFlag_ != 0;
+  }
+  uint8_t interruptFlag() const {
+    std::lock_guard<std::recursive_mutex> lk(mtx_);
+    return interruptFlag_;
+  }
   void ackInterrupt(uint8_t val);
   // Clear the INT1 "waiting for ack" gate so tick() can deliver the next sector.
   // Call this AFTER the game's data callback has DMA-copied the current sector.
   void clearWaitingForAck();
 
-  // Get sector data for DMA transfer
+  // Copy the ready sector's user-data payload out and clear the ready flag,
+  // both under the lock, so the render thread cannot drop the next sector on
+  // top of a half-read one.  This is the only safe way to consume a sector.
+  // Returns the number of bytes written to `dst`, or 0 if none was ready.
+  uint32_t takeSectorPayload(uint8_t *dst, uint32_t maxBytes);
+
+  // Raw access, kept for tests and diagnostics.  Not safe to read across a
+  // `tick` from another thread -- use `takeSectorPayload` in the DMA and HLE
+  // paths instead.
   const uint8_t *getSectorBuffer() const { return sectorBuffer_.data(); }
-  uint32_t getSectorSize() const { return sectorSize_; }
-  uint8_t getMode() const { return mode_; }
-  bool hasSectorReady() const { return sectorReady_; }
-  void clearSectorReady() { sectorReady_ = false; }
-  uint32_t getCyclesPerSector() const { return cyclesPerSector_; }
+  uint32_t getSectorSize() const {
+    std::lock_guard<std::recursive_mutex> lk(mtx_);
+    return sectorSize_;
+  }
+  uint8_t getMode() const {
+    std::lock_guard<std::recursive_mutex> lk(mtx_);
+    return mode_;
+  }
+  bool hasSectorReady() const {
+    std::lock_guard<std::recursive_mutex> lk(mtx_);
+    return sectorReady_;
+  }
+  void clearSectorReady() {
+    std::lock_guard<std::recursive_mutex> lk(mtx_);
+    sectorReady_ = false;
+  }
+  uint32_t getCyclesPerSector() const {
+    std::lock_guard<std::recursive_mutex> lk(mtx_);
+    return cyclesPerSector_;
+  }
 
   // XA-ADPCM callback for SPU
   using XaCallback = std::function<void(const int16_t *, uint32_t)>;
@@ -94,13 +135,22 @@ public:
   void setInterruptCallback(InterruptCallback cb) { interruptCallback_ = std::move(cb); }
 
   // State
-  CdromState getState() const { return state_; }
+  CdromState getState() const {
+    std::lock_guard<std::recursive_mutex> lk(mtx_);
+    return state_;
+  }
 
   // HLE helper: stop an active read (equivalent to CdlPause from the game's perspective)
-  void stopReading() { state_ = CdromState::Idle; }
+  void stopReading() {
+    std::lock_guard<std::recursive_mutex> lk(mtx_);
+    state_ = CdromState::Idle;
+  }
 
   // Returns true if a secondary response (e.g. INT2 after CdlInit INT3) is queued.
-  bool hasSecondaryResponse() const { return hasSecondaryResponse_; }
+  bool hasSecondaryResponse() const {
+    std::lock_guard<std::recursive_mutex> lk(mtx_);
+    return hasSecondaryResponse_;
+  }
 
   // Deliver any queued secondary response immediately (e.g. INT2 after CdlInit).
   // Exposed publicly so the BIOS watchpoint can fire it from the game thread.
@@ -110,6 +160,7 @@ public:
   // Used when the BIOS HLE has already delivered the interrupt synchronously
   // so the controller's own async response doesn't cause a duplicate event.
   void cancelPendingInterrupt() {
+    std::lock_guard<std::recursive_mutex> lk(mtx_);
     interruptFlag_ = 0;
     hasSecondaryResponse_ = false;
     secondaryResponseDelay_ = 0;
@@ -119,6 +170,11 @@ public:
   }
 
 private:
+  // Serialises the render thread's `tick` against the game thread's register
+  // and sector access.  Recursive: the interrupt callback re-enters through
+  // `Bios::queueCdromEvent` when it fires on the game thread.
+  mutable std::recursive_mutex mtx_;
+
   // State
   CdromState state_ = CdromState::Idle;
   uint8_t indexReg_ = 0; // Current index (0x1F801800 bits 0-1)
