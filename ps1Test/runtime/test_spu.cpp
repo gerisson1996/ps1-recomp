@@ -450,3 +450,72 @@ TEST(SpuControl, EndxFlagsClearedOnWrite) {
   // Initially 0
   EXPECT_EQ(spu.readRegister(0x1F801D9C), 0);
 }
+
+// Sound RAM Transfer Address Tests
+//
+// Crash's SPU driver programs the transfer address and then polls the
+// register back until the readback matches before switching SPUCNT to DMA
+// transfer mode. A stubbed read made that wait spin forever, so sound RAM
+// was never filled and the game was silent.
+
+TEST(SpuTransferAddress, ReadsBackTheValueWritten) {
+  SPU spu;
+  spu.reset();
+
+  spu.writeRegister(0x1F801DA6, 0x1234);
+  EXPECT_EQ(spu.readRegister(0x1F801DA6), 0x1234);
+}
+
+TEST(SpuTransferAddress, DataWritesAdvanceTheAddress) {
+  SPU spu;
+  spu.reset();
+
+  spu.writeRegister(0x1F801DA6, 0x40); // byte address 0x200
+  spu.writeTransferData(0xAAAA);
+  spu.writeTransferData(0xBBBB);
+  spu.writeTransferData(0xCCCC);
+  spu.writeTransferData(0xDDDD);
+
+  EXPECT_EQ(spu.readSoundRam(0x200), 0xAAAA);
+  EXPECT_EQ(spu.readSoundRam(0x202), 0xBBBB);
+  EXPECT_EQ(spu.readSoundRam(0x204), 0xCCCC);
+  EXPECT_EQ(spu.readSoundRam(0x206), 0xDDDD);
+  // Eight bytes written, and the register counts in 8-byte units.
+  EXPECT_EQ(spu.readRegister(0x1F801DA6), 0x41);
+}
+
+// Key On / Key Off Latch Tests
+
+TEST(SpuKeyLatch, KeyOnWinsWhenBothLatchesAreSetForTheSameVoice) {
+  // The latches are drained once per audio callback, which covers ~23 ms of
+  // guest register writes, so a voice keyed on and off inside that window
+  // arrives with both bits set. Applying both retires the voice before it
+  // ever plays, which measured as total silence in Crash. Key-on wins.
+  SPU spu;
+  spu.reset();
+
+  spu.writeRegister(0x1F801D88, 0x0001); // key on voice 0
+  spu.writeRegister(0x1F801D8C, 0x0001); // key off voice 0
+
+  // Zero samples: drain the latches without letting the envelope advance,
+  // so the phase read back is the one the latches set.
+  int16_t buffer[2] = {};
+  spu.generateSamples(buffer, 0);
+
+  EXPECT_EQ(spu.debugVoiceState(0).adsrPhase, AdsrPhase::Attack);
+}
+
+TEST(SpuKeyLatch, KeyOffAloneStillReleasesTheVoice) {
+  SPU spu;
+  spu.reset();
+
+  int16_t buffer[2] = {};
+  spu.writeRegister(0x1F801D88, 0x0001); // key on voice 0
+  spu.generateSamples(buffer, 0);
+  ASSERT_EQ(spu.debugVoiceState(0).adsrPhase, AdsrPhase::Attack);
+
+  spu.writeRegister(0x1F801D8C, 0x0001); // key off voice 0
+  spu.generateSamples(buffer, 0);
+
+  EXPECT_EQ(spu.debugVoiceState(0).adsrPhase, AdsrPhase::Release);
+}

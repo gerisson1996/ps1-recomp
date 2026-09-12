@@ -263,6 +263,15 @@ uint16_t SPU::readRegister(uint32_t addr) const {
     return endxFlags_ & 0xFFFF;
   case 0x19E:
     return (endxFlags_ >> 16) & 0xFFFF;
+  // Transfer address, in 8-byte units -- the same encoding the write takes.
+  //
+  // Crash's SPU driver writes this register and then polls it back until the
+  // readback matches before it asks for DMA transfer mode.  Returning 0 here
+  // made that wait time out (3841 spins), so the driver never set SPUCNT's
+  // transfer-mode bits, the DMA channel was never programmed, and sound RAM
+  // stayed empty -- 16 non-zero bytes out of 512 KB, and total silence.
+  case 0x1A6:
+    return static_cast<uint16_t>(transferAddr_ / 8);
   case 0x1AA:
     return spuCtrl_;
   case 0x1AE:
@@ -482,7 +491,8 @@ SPU::decodeAdpcmBlockForTest(const uint8_t block[ADPCM_BLOCK_SIZE],
 SPU::VoiceDebugState SPU::debugVoiceState(uint32_t voiceIdx) const {
   std::lock_guard<std::mutex> lock(mutex_);
   const Voice &v = voices_[voiceIdx];
-  return VoiceDebugState{v.currentAddr, v.repeatAddr, v.loopFlag, v.endFlag};
+  return VoiceDebugState{v.currentAddr, v.repeatAddr, v.loopFlag, v.endFlag,
+                         v.adsrPhase};
 }
 
 // ADSR
@@ -693,14 +703,23 @@ void SPU::processVoice(uint32_t voiceIdx, int32_t &outL, int32_t &outR,
 void SPU::generateSamples(int16_t *outputBuffer, uint32_t numSamples) {
   std::lock_guard<std::mutex> lock(mutex_);
 
-  // Process key on/off latches
+  // Process key on/off latches.
+  //
+  // Hardware retires KON/KOFF at the 44.1 kHz sample clock; we only drain them
+  // once per audio callback (~23 ms of guest writes), so both bits are often
+  // set for the same voice.  Applying both killed the voice at birth -- total
+  // silence, measured.  Key-on wins, and the release is dropped.
+  //
+  // This is not faithful: notes sustain longer than they should, which is
+  // audible as overlap.  Deferring the release by one callback instead was
+  // worse (the voice lived 23 ms), and applying both at write time also came
+  // out silent.  The real fix is per-sample retirement inside the mixer; until
+  // then this is the variant that actually produces sound.
   for (uint32_t i = 0; i < NUM_VOICES; i++) {
-    if (keyOnLatch_ & (1 << i)) {
+    if (keyOnLatch_ & (1u << i))
       keyOnVoice(i);
-    }
-    if (keyOffLatch_ & (1 << i)) {
+    else if (keyOffLatch_ & (1u << i))
       keyOffVoice(i);
-    }
   }
   keyOnLatch_ = 0;
   keyOffLatch_ = 0;

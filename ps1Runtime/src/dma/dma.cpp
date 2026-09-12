@@ -230,8 +230,14 @@ void DMA::executeBlockTransfer(uint32_t ch) {
         break;
       case SPU_CH:
         if (spu_) {
-          spu_->writeSoundRam(i * 2, word & 0xFFFF);
-          spu_->writeSoundRam(i * 2 + 2, (word >> 16) & 0xFFFF);
+          // Write through the SPU's transfer address register, which the game
+          // programs before starting the DMA and which auto-increments.
+          // Addressing by the loop index instead restarted every upload at
+          // sound RAM 0, so each one overwrote the last and the voices -- which
+          // read from their own startAddr, far from zero -- found silence.
+          // Measured: 16 non-zero bytes in the whole 512 KB.
+          spu_->writeTransferData(word & 0xFFFF);
+          spu_->writeTransferData((word >> 16) & 0xFFFF);
         }
         break;
       case MDEC_IN:
