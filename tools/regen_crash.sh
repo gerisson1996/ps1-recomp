@@ -149,11 +149,11 @@ if [[ "$RUN_RECOMP" -eq 1 ]]; then
   echo "[regen_crash] running ps1Recomp -> $OUT_CPP"
   "$RECOMP" "$OUT_TOML" "$OUT_CPP"
 
-  # Suppression (2026-09-01) -- keeps the level playable. See the script's
-  # docstring: this is a workaround for callback damage during decompression,
-  # not a fix, and it must be reapplied after every regen.
-  echo "[regen_crash] suppressing decompressor drain"
-  "$PROJECT_DIR/tools/suppress_decomp_drain.py" "$OUT_CPP"
+  # The decompressor's callback yield points used to have to be suppressed
+  # here (tools/suppress_decomp_drain.py, since deleted).  What actually
+  # damaged the decompression was the CDROM sector hand-off racing the render
+  # thread, not the callback: with that serialised, 18 consecutive runs load
+  # the level with the drains left in place.
 fi
 
 echo "[regen_crash] done."
