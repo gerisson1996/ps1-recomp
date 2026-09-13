@@ -96,3 +96,23 @@ TEST(DispatchEmitter, NullDispatchStillReturnsQuietly) {
 }
 
 } // namespace
+
+// The site address is the only clue that survives every path.  `RA` holds the
+// return address of the last direct call, so it names an unrelated function
+// whenever the bad jump came through one, and the host stack names the
+// emitted function but not which of its indirect sites fired -- Crash's GOOL
+// interpreter alone has seven.
+TEST(DispatchEmitter, FatalMessageNamesTheIndirectSite) {
+  const std::string body = emitDispatchBody();
+  EXPECT_NE(at(body, "ps1LastIndirectSite()"), std::string::npos);
+  EXPECT_NE(at(body, "issued from guest site 0x{:08X}"), std::string::npos);
+}
+
+TEST(DispatchEmitter, FatalPathPrintsAHostStack) {
+  const std::string body = emitDispatchBody();
+  EXPECT_NE(at(body, "backtrace_symbols_fd"), std::string::npos);
+  const size_t stackAt = at(body, "backtrace_symbols_fd");
+  const size_t abortAt = at(body, "std::abort();");
+  ASSERT_NE(abortAt, std::string::npos);
+  EXPECT_LT(stackAt, abortAt) << "the stack has to be printed before aborting";
+}

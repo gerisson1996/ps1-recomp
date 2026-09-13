@@ -258,7 +258,30 @@ TEST(HijackedReturnAddress, OrdinaryIndirectJumpStillReturns) {
 
   const std::string out = em.emitFunction(f);
 
-  EXPECT_NE(out.find("JUMP_INDIRECT(ctx, ctx->r20);"), std::string::npos)
+  // The plain form, which returns.  Every indirect site also carries its own
+  // guest address so the dispatcher can name it when a target does not
+  // resolve, hence the _AT suffix and the trailing argument.
+  EXPECT_NE(out.find("JUMP_INDIRECT_AT(ctx, ctx->r20, 0x"), std::string::npos)
       << out;
+  EXPECT_EQ(out.find("JUMP_INDIRECT_RESUME"), std::string::npos) << out;
   EXPECT_EQ(out.find("ctx->r31 =="), std::string::npos) << out;
+}
+
+// An indirect call carries its own guest address too, not just the return
+// address it writes to $ra.
+TEST(IndirectSite, JalrRecordsTheCallSiteAddress) {
+  ps1recomp::InstructionEmitter em;
+  ps1recomp::RecompFunction f;
+  f.name = "callsite";
+  f.address = 0x80010000u;
+  // jalr $ra, $t9 ; nop ; jr $ra ; nop
+  f.instructions = {0x0320F809u, 0x00000000u, 0x03E00008u, 0x00000000u};
+  f.isLabelTarget.assign(f.instructions.size(), false);
+  f.size = static_cast<uint32_t>(f.instructions.size() * 4);
+
+  const std::string out = em.emitFunction(f);
+
+  EXPECT_NE(out.find("CALL_INDIRECT_AT(ctx, ctx->r25, 0x80010000u);"),
+            std::string::npos)
+      << out;
 }

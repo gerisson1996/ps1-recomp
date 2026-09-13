@@ -335,10 +335,10 @@ std::string InstructionEmitter::emitJump(const Instruction &inst,
     if (inst.rs == 31) {
       return "return;";
     }
-    return fmt::format("JUMP_INDIRECT(ctx, {});", reg(inst.rs));
+    return fmt::format("JUMP_INDIRECT_AT(ctx, {}, 0x{:08X}u);", reg(inst.rs), pc);
   case InstrId::JALR:
-    return fmt::format("ctx->r{} = 0x{:08X}; CALL_INDIRECT(ctx, {});", inst.rd,
-                       pc + 8, reg(inst.rs));
+    return fmt::format("ctx->r{} = 0x{:08X}; CALL_INDIRECT_AT(ctx, {}, 0x{:08X}u);",
+                       inst.rd, pc + 8, reg(inst.rs), pc);
   default:
     return fmt::format("// UNKNOWN JUMP: {}", MipsDecoder::instrName(inst.id));
   }
@@ -556,11 +556,11 @@ std::string InstructionEmitter::emitFunction(const RecompFunction &func) const {
   // it entered ends in `jr $ra`, which is a resume, not a return. Returning
   // anyway unwinds past this function's epilogue, so whatever it stashed on
   // entry -- $sp included -- is never restored.
-  auto indirectJump = [&](uint8_t rs) {
+  auto indirectJump = [&](uint8_t rs, uint32_t site) {
     if (raResume.empty())
-      return fmt::format("JUMP_INDIRECT(ctx, {});", reg(rs));
+      return fmt::format("JUMP_INDIRECT_AT(ctx, {}, 0x{:08X}u);", reg(rs), site);
     std::string code =
-        fmt::format("JUMP_INDIRECT_RESUME(ctx, {});\n", reg(rs));
+        fmt::format("JUMP_INDIRECT_RESUME_AT(ctx, {}, 0x{:08X}u);\n", reg(rs), site);
     for (uint32_t target : raResume) {
       code += fmt::format("    if (ctx->r31 == 0x{:08X}u) goto {};\n", target,
                           label(target));
@@ -618,7 +618,7 @@ std::string InstructionEmitter::emitFunction(const RecompFunction &func) const {
             sw += fmt::format("    if (_sw_target == 0x{:08X}u) goto {};\n",
                               target, label(target));
           }
-          sw += fmt::format("    // fallback\n    {}\n", indirectJump(inst.rs));
+          sw += fmt::format("    // fallback\n    {}\n", indirectJump(inst.rs, addr));
           sw += "    }";
           code = sw;
           tabled = true;
@@ -649,13 +649,13 @@ std::string InstructionEmitter::emitFunction(const RecompFunction &func) const {
           ++n;
         }
         if (n == 0) {
-          code = indirectJump(inst.rs);
+          code = indirectJump(inst.rs, addr);
         } else {
           code = fmt::format("{{ // in-function labels ({} entries)\n"
                              "    uint32_t _sw_target = static_cast<uint32_t>({});\n"
                              "{}"
                              "    // fallback\n    {}\n    }}",
-                             n, reg(inst.rs), sw, indirectJump(inst.rs));
+                             n, reg(inst.rs), sw, indirectJump(inst.rs, addr));
         }
       }
     }
