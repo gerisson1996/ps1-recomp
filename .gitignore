@@ -32,22 +32,28 @@ test_roms/
 *.cue
 *.ecm
 
-# Documentation
-docs/
-
 # cache
 __pycache__/
 *.pyc
 
-# PsyQ SDK files (proprietary, never committed — kept outside repo)
+# PsyQ SDK files
 *.LIB
 *.OBJ
 
 # Local artifacts
 .venv/
 *.AppImage
-.claude/
-.mcp.json
 
-# psyq-obj-parser binary — rebuild from pcsx-redux clone, do not version
+# psyq-obj-parser binary
 tools/psyq-obj-parser-bin/psyq-obj-parser
+
+# Emulated memory cards (per-machine save data, not source)
+memcards/
+
+# Local debugging scripts.
+tools/coverage_frontier.py
+tools/coverage_inject.py
+tools/diff_oracle.py
+tools/find_truncated_funcs.py
+tools/jpsxdec.sh
+tools/sp_sentry_inject.py
