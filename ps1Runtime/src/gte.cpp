@@ -325,26 +325,40 @@ void GTE::pushRGB(CPUContext *ctx, uint8_t r, uint8_t g, uint8_t b,
                          (static_cast<uint32_t>(cd) << 24);
 }
 
+// Perspective division, `(H * 0x20000) / SZ3` as the hardware computes it:
+// normalise the divisor, look up a seed reciprocal, then refine it with two
+// Newton-Raphson steps. psx-spx, "GTE Division Inaccuracy":
+//
+//   z = count_leading_zeroes(SZ3)
+//   n = H << z ; d = SZ3 << z
+//   u = unr_table[(d - 0x7FC0) >> 7] + 0x101
+//   d = (0x2000080 - d * u) >> 8
+//   d = (0x0000080 + d * u) >> 8
+//   n = min(0x1FFFF, (n * d + 0x8000) >> 16)
+//
+// Both refinement steps are what turn the ~0x101-scale seed into a 0x10000
+// scale reciprocal. Without them the quotient comes out ~100x too small and
+// every projected vertex collapses onto the screen origin, which makes each
+// triangle degenerate -- measured in Crash Bandicoot as 99.6% of ~800k
+// triangles with zero area, SX2 = -1 where the hardware gives -123.
 uint32_t GTE::divide(CPUContext *ctx, uint16_t h, uint16_t sz3) {
-  if (sz3 == 0) {
+  // Overflow when the result would not fit 1.17: H >= SZ3*2.
+  if (sz3 == 0 || static_cast<uint32_t>(h) >= static_cast<uint32_t>(sz3) * 2) {
     ctx->cop2c[GTE_FLAG] |= gte_flag::DIV_OVERFLOW;
     return 0x1FFFF;
   }
-  if (static_cast<uint32_t>(h) * 2 > static_cast<uint32_t>(sz3)) {
-    ctx->cop2c[GTE_FLAG] |= gte_flag::DIV_OVERFLOW;
-    return 0x1FFFF;
-  }
-  int shift = countLeadingZeros(sz3) - 16;
-  uint64_t n = static_cast<uint64_t>(h) << shift;
-  uint32_t d = static_cast<uint32_t>(sz3) << shift;
-  uint32_t idx = (d >> 7) & 0xFF;
-  if (idx > 256)
-    idx = 256;
-  int32_t factor = s_unrTable[idx] + 0x101;
-  d = (d | 0x8000);
-  uint32_t res = static_cast<uint32_t>(
-      std::min<uint64_t>((n * factor + 0x8000) >> 16, 0x1FFFF));
-  return res;
+  const int shift = countLeadingZeros(sz3) - 16;
+  const uint64_t n = static_cast<uint64_t>(h) << shift;
+  uint64_t d = static_cast<uint64_t>(sz3) << shift;
+
+  // d is normalised to [0x8000, 0xFFFF], so the index lands in [0, 0x100].
+  const uint32_t idx = static_cast<uint32_t>((d - 0x7FC0) >> 7);
+  const uint64_t u = static_cast<uint64_t>(s_unrTable[idx]) + 0x101;
+
+  d = (0x2000080 - d * u) >> 8;
+  d = (0x0000080 + d * u) >> 8;
+
+  return static_cast<uint32_t>(std::min<uint64_t>((n * d + 0x8000) >> 16, 0x1FFFF));
 }
 
 // MVMVA core

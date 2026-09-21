@@ -51,6 +51,49 @@ protected:
   }
 };
 
+// RTPS -- perspective division
+//
+// The divide seeds a reciprocal from the UNR table and then refines it with
+// two Newton-Raphson steps. Skipping the refinement leaves a ~0x101-scale
+// factor where a 0x10000-scale reciprocal belongs, so the quotient lands
+// ~100x low and every vertex projects onto the screen origin. Measured in
+// Crash Bandicoot as 99.6% of ~800k triangles collapsing to zero area.
+//
+// Numbers here are a real frame: MAC1 = -439 after the rotation, SZ3 = 5720,
+// H = 800. The projection is IR1 * H / SZ3 = -439 * 800 / 5720 = -61.4, so
+// SX2 must land there -- the unrefined divide gave -1.
+TEST_F(GTETest, RTPS_PerspectiveDivideRefinesTheReciprocal) {
+  setIdentityRotation();
+  setTranslation(0, 0, 5720);   // vertex at the origin -> SZ3 = TRZ
+  setProjection(800, 0, 0, 0, 0);
+  setV0(-439, 0, 0);            // identity rotation -> MAC1 = -439
+
+  GTE::RTPS(&ctx, true, false);
+
+  EXPECT_EQ(ctx.cop2d[GTE_SZ3], 5720u);
+  const auto sx = static_cast<int16_t>(ctx.cop2d[GTE_SXY2] & 0xFFFF);
+  const auto sy = static_cast<int16_t>(ctx.cop2d[GTE_SXY2] >> 16);
+  EXPECT_NEAR(sx, -61, 2) << "quotient collapsed; got SX2 = " << sx;
+  EXPECT_EQ(sy, 0);
+}
+
+// H >= SZ3*2 is the hardware's overflow condition. The inverted form
+// (h*2 > sz3) fired on every near vertex and returned the 0x1FFFF clamp.
+TEST_F(GTETest, RTPS_DivideOverflowOnlyWhenHIsAtLeastTwiceSZ3) {
+  setIdentityRotation();
+  setProjection(800, 0, 0, 0, 0);
+  setV0(0, 0, 0);
+
+  setTranslation(0, 0, 500); // H=800 >= 1000? no -> no overflow
+  GTE::RTPS(&ctx, true, false);
+  EXPECT_EQ(ctx.cop2c[GTE_FLAG] & gte_flag::DIV_OVERFLOW, 0u)
+      << "SZ3=500 with H=800 must not overflow";
+
+  setTranslation(0, 0, 300); // H=800 >= 600 -> overflow
+  GTE::RTPS(&ctx, true, false);
+  EXPECT_NE(ctx.cop2c[GTE_FLAG] & gte_flag::DIV_OVERFLOW, 0u);
+}
+
 // NCLIP
 
 TEST_F(GTETest, NCLIP_CounterClockwise) {
