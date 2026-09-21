@@ -228,6 +228,34 @@ private:
   void executeLine();
   void executeRect();
 
+  // Primitive census (`PS1_CENSUS=<from>:<to>`, VBlank window).
+  //
+  // Answers "did this geometry reach the GPU at all" without knowing which
+  // game function submitted it: every triangle is tallied as drawn, degenerate
+  // or clipped-away, and its centroid is dropped into a coarse grid over the
+  // display area.  Rendering that grid next to the frame shows whether missing
+  // content was never submitted or was submitted and thrown away.
+public:
+  void censusDump(const char *path) const;
+  void censusReset();
+
+private:
+  void censusRect(int x, int y, int w, int h);
+  void censusTriangle(const Vertex &v0, const Vertex &v1, const Vertex &v2,
+                      bool degenerate);
+  static constexpr int kCensusW = 64;
+  static constexpr int kCensusH = 30;
+  mutable uint32_t censusGrid_[kCensusH][kCensusW]{};
+  mutable uint32_t censusGridTri_[kCensusH][kCensusW]{};
+  mutable uint64_t censusTri_ = 0;
+  mutable uint64_t censusGt4Start_ = 0;
+  mutable uint64_t censusGt4Exec_ = 0;
+  mutable uint64_t censusDrawn_ = 0;
+  mutable uint64_t censusDegenerate_ = 0;
+  mutable uint64_t censusClipped_ = 0;
+  mutable uint64_t censusClippedTri_ = 0;
+  mutable uint64_t censusClipPrints_ = 0;
+
   // Helper methods for rasterization
   Color16 applyDither(Color16 baseColor, int x, int y);
 

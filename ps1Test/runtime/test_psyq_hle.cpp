@@ -71,12 +71,41 @@ TEST_F(PsyqHleTest, DrawSyncMode1ReturnsZero) {
 
 // ResetGraph
 
-TEST_F(PsyqHleTest, ResetGraphIsNop) {
+TEST_F(PsyqHleTest, ResetGraphEmitsNoGpuCommands) {
     ctx.r[A0] = 0;
     hle_ResetGraph(&ctx);
-    // No crash, no GP0/GP1 commands emitted
+    // The runtime GPU is synchronous -- there is no list to flush.
     EXPECT_TRUE(gp0Words.empty());
     EXPECT_TRUE(gp1Words.empty());
+}
+
+// ResetGraph also builds libgpu's environment block in the game's BSS. Leaving
+// it zeroed is not neutral: the 28 trailing slots are "empty" markers, so zero
+// reads as "slot 0" everywhere. Measured against the same binary's own
+// ResetGraph and against the reference recompilation -- 32 words, identical.
+TEST_F(PsyqHleTest, ResetGraphBuildsTheLibgpuEnvBlock) {
+    constexpr uint32_t kEnv = 0x80054A6C;
+    psyq_state().gpuEnvAddr = kEnv;
+
+    hle_ResetGraph(&ctx);
+
+    EXPECT_EQ(mem.read32(kEnv + 0), 0x00000100u);
+    EXPECT_EQ(mem.read32(kEnv + 4), 0x02000400u);
+    EXPECT_EQ(mem.read32(kEnv + 8), 0x00000001u);
+    EXPECT_EQ(mem.read32(kEnv + 12), 0x00000000u);
+    for (uint32_t i = 0; i < kGpuEnvFreeSlots; ++i)
+        EXPECT_EQ(mem.read32(kEnv + 16 + i * 4), 0xFFFFFFFFu) << "slot " << i;
+}
+
+// Games that have not been mapped leave the address unset; the HLE must stay
+// the no-op it was rather than writing over address zero.
+TEST_F(PsyqHleTest, ResetGraphWithoutAnEnvAddressWritesNothing) {
+    psyq_state().gpuEnvAddr = 0;
+    mem.write32(0x80054A6C, 0xDEADBEEFu);
+
+    hle_ResetGraph(&ctx);
+
+    EXPECT_EQ(mem.read32(0x80054A6C), 0xDEADBEEFu);
 }
 
 // VSync

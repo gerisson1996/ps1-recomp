@@ -1,4 +1,5 @@
 #include "runtime/psyq/psyq_hle.h"
+#include "runtime/bios/bios.h"
 #include "runtime/emuptr.h"
 #include "runtime/memory.h"
 #include "runtime/metrics.h"
@@ -68,6 +69,10 @@ void hle_VSync(recomp_context *ctx) {
   auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(1);
   while (counter.load(std::memory_order_acquire) < target &&
          std::chrono::steady_clock::now() < deadline) {
+    // The VBlank tick runs on this thread now (see Bios::setVBlankPump), so
+    // the wait has to drive it -- nothing else advances the counter.
+    if (ctx->bios)
+      ctx->bios->pumpVBlank();
     drainOnce();
     std::this_thread::sleep_for(std::chrono::microseconds(100));
   }
@@ -106,9 +111,33 @@ void hle_DrawSync(recomp_context *ctx) {
 //
 // The runtime GPU has no queued command list to flush, so this is a NOP.
 //
+// ResetGraph
+//
+// PsyQ `ResetGraph(mode)` resets the GPU *and* builds libgpu's own environment
+// block in the game's BSS. This runtime's GPU is synchronous, so there is no
+// command list to flush -- but the block still has to exist, because the rest
+// of libgpu reads it. Leaving it zeroed is not neutral: the 28 slots below are
+// "empty" markers, and zero means "slot 0" everywhere instead.
+//
+// Reference is the game's own `ResetGraph`, run as recompiled MIPS and dumped:
+// the block is 32 words -- an info word, a resolution word (0x02000400), an
+// enable flag, a pad, then 28 words of 0xFFFFFFFF. Confirmed identical in the
+// reference recompilation of the same binary at the same point in the run.
+//
+// The block's address is game BSS, so it comes from the TOML (`[timing]
+// gpu_env_addr`); zero leaves this a no-op, which is the pre-existing
+// behaviour for games that have not been mapped.
 void hle_ResetGraph(recomp_context *ctx) {
-  (void)ctx;
-  // NOP: runtime GPU is synchronous, no list to flush
+  const uint32_t env = ps1::psyq::psyq_state().gpuEnvAddr;
+  if (env == 0 || ctx->mem == nullptr)
+    return;
+
+  ctx->mem->write32(env + 0, 0x00000100u);  // GPU info / type
+  ctx->mem->write32(env + 4, 0x02000400u);  // default resolution
+  ctx->mem->write32(env + 8, 0x00000001u);  // enabled
+  ctx->mem->write32(env + 12, 0x00000000u); // pad
+  for (uint32_t i = 0; i < kGpuEnvFreeSlots; ++i)
+    ctx->mem->write32(env + 16 + i * 4, 0xFFFFFFFFu);
 }
 
 // ClearOTag
@@ -196,6 +225,19 @@ void hle_DrawOTag(recomp_context *ctx) {
     return;
   }
   ps1::metrics::count("draw_otag.calls");
+  // `PS1_OT_DUMP=<n>`: on the nth call, histogram what the ordering table
+  // actually contains.  Missing on-screen content is either absent from the
+  // table (the builder never emitted it) or present but dropped by the walk,
+  // and only the table's own contents tell the two apart.
+  static const long otDumpAt = []() {
+    const char *e = std::getenv("PS1_OT_DUMP");
+    return (e && *e) ? std::strtol(e, nullptr, 10) : 0;
+  }();
+  static long otCall = 0;
+  const bool otDump = (otDumpAt > 0 && ++otCall == otDumpAt);
+  uint32_t otOps[256] = {};
+  uint32_t otEmpty = 0;
+
   uint32_t ptr = ctx->r[A0];
   int safety = 0;
   while ((ptr & 0xFFFFFFu) != 0xFFFFFFu && safety++ < 100000) {
@@ -203,6 +245,12 @@ void hle_DrawOTag(recomp_context *ctx) {
     uint32_t wordCount = (hdr >> 24) & 0xFF;
     ps1::metrics::count("draw_otag.nodes");
     ps1::metrics::count("draw_otag.words", wordCount);
+    if (otDump) {
+      if (wordCount == 0)
+        ++otEmpty;
+      else
+        ++otOps[ctx->mem->read32(ptr + 4) >> 24];
+    }
     for (uint32_t i = 0; i < wordCount; i++) {
       g_cfg.writeGP0(ctx->mem->read32(ptr + 4 + i * 4));
     }
@@ -210,6 +258,13 @@ void hle_DrawOTag(recomp_context *ctx) {
     if (next == 0xFFFFFFu)
       break;
     ptr = next | 0x80000000u; // restore KSEG0 bit
+  }
+  if (otDump) {
+    fmt::print(stderr, "[OT] call#{} nodes={} empty={} safety_hit={}\n", otCall,
+               safety, otEmpty, safety >= 100000);
+    for (int i = 0; i < 256; ++i)
+      if (otOps[i])
+        fmt::print(stderr, "[OT]   op 0x{:02X} x{}\n", i, otOps[i]);
   }
   ctx->r[V0] = 0;
 }

@@ -49,11 +49,17 @@ bool isPermissive() {
 void psyq_dispatch(const char *name, recomp_context *ctx) {
   // Optional per-call trace gated by `PS1_HLE_TRACE=1`.  Single getenv
   // (cached) so the fast path is just a load+branch.
-  static const bool s_trace = []() {
+  // `PS1_HLE_TRACE=1` traces every call; `PS1_HLE_TRACE=<substring>` traces
+  // only the names containing it (e.g. `libcd`).  Tracing everything emits
+  // thousands of lines a second, which is enough to change the timing of the
+  // run being diagnosed -- the filter keeps a targeted trace cheap.
+  static const char *s_filter = []() -> const char * {
     const char *e = std::getenv("PS1_HLE_TRACE");
-    return e && std::strcmp(e, "0") != 0 && e[0] != '\0';
+    if (!e || e[0] == '\0' || std::strcmp(e, "0") == 0)
+      return nullptr;
+    return (std::strcmp(e, "1") == 0) ? "" : e;
   }();
-  if (s_trace) {
+  if (s_filter && (s_filter[0] == '\0' || std::strstr(name, s_filter))) {
     fmt::print(stderr, "[PSYQ] {} (a0={:08X} a1={:08X} a2={:08X} RA={:08X})\n",
                name, ctx->r[4], ctx->r[5], ctx->r[6], ctx->r[31]);
   }

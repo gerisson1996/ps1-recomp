@@ -1,6 +1,7 @@
 #include "runtime/bios/event_system.h"
 #include "runtime/cpu_context.h"
 #include "runtime/memory.h"
+#include <chrono>
 #include <cstdlib>
 #include <fmt/core.h>
 
@@ -14,6 +15,7 @@ extern void recomp_dispatch(uint8_t *rdram, recomp_context *ctx,
                             uint32_t target_pc);
 
 namespace ps1::bios {
+
 
 EventSystem::EventSystem(recomp_context &ctx) : ctx_(ctx) {
   // Usually games assume event IDs start from a specific range or we can just
@@ -59,6 +61,8 @@ uint32_t EventSystem::closeEvent(uint32_t eventId) {
 
   events_[eventId].enabled = false;
   events_[eventId].pendingTrigger = false;
+  fmt::print(stderr, "[EVT-CLOSE] id={} classe=0x{:08X}\n", eventId,
+             events_[eventId].classId);
   events_[eventId].classId = 0xFFFFFFFF; // Mark inactive
   triggeredBits_.fetch_and(~(1u << eventId), std::memory_order_release);
 
@@ -93,7 +97,29 @@ uint32_t EventSystem::testEvent(uint32_t eventId) {
   // reads)
   uint32_t bit = 1u << eventId;
   uint32_t bits = triggeredBits_.load(std::memory_order_acquire);
-  if (bits & bit) {
+  const bool hit = (bits & bit) != 0;
+
+  // `PS1_EVENT_TRACE=<id>`: count how often this descriptor is polled versus
+  // how often the poll actually consumes a trigger.  testEvent clears the bit
+  // it reports, so a descriptor polled far more often than it is delivered can
+  // have its single trigger consumed by a caller that does not act on it --
+  // the signal disappears without either side looking wrong in isolation.
+  static const long traceId = []() {
+    const char *e = std::getenv("PS1_EVENT_TRACE");
+    return (e && *e) ? std::strtol(e, nullptr, 0) : -1;
+  }();
+  if (traceId >= 0 && eventId == static_cast<uint32_t>(traceId)) {
+    static unsigned long polls = 0, hits = 0;
+    ++polls;
+    if (hit)
+      ++hits;
+    if (hit || (polls % 500000) == 0)
+      fmt::print(stderr,
+                 "[EVT{}] consultas={} acertos={} bits=0x{:08X}\n",
+                 eventId, polls, hits, bits);
+  }
+
+  if (hit) {
     // Clear this bit atomically (acknowledge)
     triggeredBits_.fetch_and(~bit, std::memory_order_release);
     return 1;
@@ -123,6 +149,8 @@ uint32_t EventSystem::disableEvent(uint32_t eventId) {
   if (eventId >= events_.size())
     return 0;
   events_[eventId].enabled = false;
+  fmt::print(stderr, "[EVT-DISABLE] id={} classe=0x{:08X}\n", eventId,
+             events_[eventId].classId);
   EVT_LOG("[BIOS] DisableEvent({})\n", eventId);
   return 1;
 }
@@ -130,6 +158,26 @@ uint32_t EventSystem::disableEvent(uint32_t eventId) {
 void EventSystem::triggerEvent(uint32_t classId, uint32_t specId) {
   std::lock_guard<std::mutex> lk(eventsMtx_);
   bool found = false;
+  // `PS1_EVENT_TRACE=<id>` also reports every delivery aimed at that
+  // descriptor's class/spec: whether the table matched, and with what.  A
+  // delivery that matches nothing looks identical from the caller's side to
+  // one that works, which is how a live event can go silent unnoticed.
+  static const long traceId = []() {
+    const char *e = std::getenv("PS1_EVENT_TRACE");
+    return (e && *e) ? std::strtol(e, nullptr, 0) : -1;
+  }();
+  const bool trace =
+      traceId >= 0 && static_cast<std::size_t>(traceId) < events_.size() &&
+      events_[traceId].classId == classId && events_[traceId].specId == specId;
+  if (trace) {
+    static unsigned long n = 0;
+    if ((++n % 200) == 1)
+      fmt::print(stderr,
+                 "[EVT-ENTREGA] #{} classe=0x{:08X} spec=0x{:X} alvo_id={} "
+                 "habilitado={} tabela={} bits=0x{:08X}\n",
+                 n, classId, specId, traceId, events_[traceId].enabled,
+                 events_.size(), triggeredBits_.load());
+  }
   for (size_t i = 0; i < events_.size(); i++) {
     auto &ev = events_[i];
     if (ev.classId == classId && ev.specId == specId) {
@@ -137,6 +185,14 @@ void EventSystem::triggerEvent(uint32_t classId, uint32_t specId) {
       if (!ev.enabled) {
         // Buffer the trigger; will be applied when EnableEvent is called.
         ev.pendingTrigger = true;
+        if (s_evtVerbose || std::getenv("PS1_EVENT_TRACE")) {
+          static unsigned long swallowed = 0;
+          if ((++swallowed % 200) == 1)
+            fmt::print(stderr,
+                       "[EVT-ENGOLIDO] #{} id={} classe=0x{:08X} spec=0x{:X} "
+                       "(desabilitado)\n",
+                       swallowed, i, classId, specId);
+        }
         continue;
       }
       // Set bit in atomic bitmask (thread-safe for main->game thread visibility)
@@ -147,6 +203,11 @@ void EventSystem::triggerEvent(uint32_t classId, uint32_t specId) {
         // directly (which would be thread-unsafe when called from main thread).
         std::lock_guard<std::mutex> lk2(cbMtx_);
         pendingCallbacks_.push_back({ev.handler, 0, 0, false, false});
+        // Keep the lock-free mirror in step: `Bios::drainPendingCallbacks`
+        // skips the whole slow path when `hasPendingCallbacks()` reads false,
+        // so a queue push that forgets this counter is a callback that never
+        // runs.
+        pendingCount_.store(pendingCallbacks_.size(), std::memory_order_release);
       }
     }
   }
@@ -180,6 +241,25 @@ void EventSystem::tick() {
   // Evaluate if any triggered events need handling
 }
 
+void EventSystem::recordDispatch(uint32_t pc, uint64_t nanos) {
+  for (std::size_t i = 0; i < kMaxCallbackStats; ++i) {
+    uint32_t slot = cbStats_[i].pc.load(std::memory_order_relaxed);
+    if (slot == 0) {
+      cbStats_[i].pc.store(pc, std::memory_order_relaxed);
+      slot = pc;
+    }
+    if (slot != pc)
+      continue;
+    cbStats_[i].calls.store(
+        cbStats_[i].calls.load(std::memory_order_relaxed) + 1,
+        std::memory_order_relaxed);
+    cbStats_[i].nanos.store(
+        cbStats_[i].nanos.load(std::memory_order_relaxed) + nanos,
+        std::memory_order_relaxed);
+    return;
+  }
+}
+
 void EventSystem::drainPendingCallbacks() {
   // Move callbacks to a local copy under the lock, then release the lock
   // before dispatching (dispatched callbacks may re-enter triggerEvent).
@@ -190,6 +270,7 @@ void EventSystem::drainPendingCallbacks() {
       return;
     local = std::move(pendingCallbacks_);
     pendingCallbacks_.clear();
+    pendingCount_.store(0, std::memory_order_release);
   }
 
   for (const auto &cb : local) {
@@ -209,7 +290,13 @@ void EventSystem::drainPendingCallbacks() {
     if (dispCbCount++ < 5)
       fmt::print(stderr, "[EVT] drainPendingCallbacks: dispatching 0x{:08X} a0=0x{:X}\n",
                  cb.handlerPc, cb.hasArg ? cb.a0 : 0);
+    const auto t0 = std::chrono::steady_clock::now();
     recomp_dispatch(ctx_.mem->ramPtr(), &ctx_, cb.handlerPc);
+    recordDispatch(cb.handlerPc,
+                   static_cast<uint64_t>(
+                       std::chrono::duration_cast<std::chrono::nanoseconds>(
+                           std::chrono::steady_clock::now() - t0)
+                           .count()));
 
     // Restore all registers that the game was using
     static_cast<ps1::CPUContext &>(ctx_) = saved;

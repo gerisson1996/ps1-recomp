@@ -19,6 +19,7 @@ void PsyqState::reset() {
   callbacksEnabled = true;
   drawSync = GpuDrawSync{};
   rcntTickAddr = 0;
+  gpuEnvAddr = 0;
   rcntTicksPerVBlank = 0;
 }
 

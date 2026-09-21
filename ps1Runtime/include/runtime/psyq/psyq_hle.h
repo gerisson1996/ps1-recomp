@@ -86,6 +86,9 @@ void hle_DrawSync(recomp_context *ctx);
 /// ResetGraph(mode) -- reset GPU to a known state.
 /// mode 0 -> flush + clear; mode 3 -> flush only.
 /// Implemented as a NOP here because GPU reset is handled by the runtime.
+/// Slots libgpu's environment block keeps marked empty (0xFFFFFFFF).
+inline constexpr uint32_t kGpuEnvFreeSlots = 28;
+
 void hle_ResetGraph(recomp_context *ctx);
 
 /// ClearOTag(ot, n) -- fill an ordering-table with end-of-list terminators.

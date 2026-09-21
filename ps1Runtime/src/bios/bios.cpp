@@ -8,7 +8,9 @@
 #include "runtime/psyq/psyq_state.h"
 #include <algorithm>
 #include <chrono>
+#include <cstdlib>
 #include <cstring>
+#include <execinfo.h>
 #include <fmt/format.h>
 
 // Forward declare recomp_dispatch (defined in recompiled_out.cpp, global
@@ -129,6 +131,7 @@ void Bios::queueCdromEvent(uint8_t cdIntType) {
   {
     std::lock_guard<std::mutex> lk(cdEventQueueMtx_);
     cdEventQueue_.push(cdIntType);
+    cdEventQueueDepth_.store(cdEventQueue_.size(), std::memory_order_release);
   }
 
   // Inline-drain when the push originates from the game thread itself
@@ -152,6 +155,7 @@ std::size_t Bios::drainCdromEventQueue() {
   {
     std::lock_guard<std::mutex> lk(cdEventQueueMtx_);
     std::swap(local, cdEventQueue_);
+    cdEventQueueDepth_.store(cdEventQueue_.size(), std::memory_order_release);
   }
   std::size_t count = local.size();
   while (!local.empty()) {
@@ -453,7 +457,53 @@ void Bios::triggerVBlankEvent() {
   }
 }
 
-void Bios::drainPendingCallbacks() {
+bool Bios::drainGateEnabled() {
+  const char *e = std::getenv("PS1_DRAIN_GATE");
+  return !(e && e[0] == '0');
+}
+
+bool Bios::spGuardEnabled() { return std::getenv("PS1_SP_GUARD") != nullptr; }
+
+void Bios::reportBadStackPointer(uint32_t sp) {
+  if (badSpReports_ >= 8)
+    return;
+  ++badSpReports_;
+  fmt::print(stderr, "[SP-GUARD] #{} guest $sp=0x{:08X} $ra=0x{:08X}\n",
+             badSpReports_, sp, ctx_.r31);
+  void *frames[24];
+  int depth = backtrace(frames, 24);
+  char **syms = backtrace_symbols(frames, depth);
+  for (int i = 1; i < depth && i < 10; ++i)
+    fmt::print(stderr, "[SP-GUARD]   #{} {}\n", i, syms ? syms[i] : "?");
+  free(syms);
+}
+
+void Bios::drainPendingCallbacksSlow() {
+  ++drainSlow_;
+  if (vsyncPtr_ == nullptr)
+    vsyncPtr_ = &ps1::psyq::psyq_state().vsyncCounter;
+
+  // A dispatched callback runs recompiled game code, and the recompiler injects
+  // a drain at every backward branch -- so a callback with a loop in it calls
+  // back into here and gets dispatched again, without bound. Measured in Crash
+  // Bandicoot: the sound-engine tick `func_800466A0` re-entered ~165k times per
+  // dispatch, 561 million nested calls against 153 thousand real yield points,
+  // and the game thread never returned to its main loop.
+  //
+  // Hardware has the same rule -- an interrupt handler does not re-enter the
+  // dispatcher -- so refusing the nested call is the faithful behaviour. The
+  // check comes before anything else, counters included: at these volumes even
+  // counting the nested calls costs real time.
+  if (draining_) {
+    ++drainNested_;
+    return;
+  }
+  draining_ = true;
+  struct Clear {
+    bool &flag;
+    ~Clear() { flag = false; }
+  } clear{draining_};
+
   // Diagnostic — env-gated via `PS1_DRAIN_TRACE=N` (period). Prints
   // every Nth entry + every Nth exit so we can tell whether the
   // function is being re-entered, returns cleanly, or hangs inside.
@@ -495,8 +545,10 @@ void Bios::drainPendingCallbacks() {
       lastIntrTickFrame_ = frame;
       for (std::size_t irq = 4; irq <= 6; ++irq) {
         uint32_t cb = st.intrCallback[irq];
-        if (cb != 0)
+        if (cb != 0) {
           eventSystem_.queueCallback(cb);
+          ++drainDispatched_;
+        }
       }
     }
   }
