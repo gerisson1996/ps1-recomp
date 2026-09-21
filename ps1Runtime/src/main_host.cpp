@@ -347,61 +347,58 @@ static void audioCallback(void * /*userdata*/, uint8_t *stream, int len) {
 }
 
 // SDL2 Key Mapping
+// Keyboard to PS1 pad.  One table, so the startup banner and the event handler
+// cannot drift apart -- the pad layout is the first thing anyone needs to know
+// to play, and "which key is Start" has already cost a play session.
+struct KeyBinding {
+  SDL_Keycode key;
+  uint16_t button;
+  const char *keyName;
+  const char *padName;
+};
+
+static const KeyBinding kPadBindings[] = {
+    {SDLK_UP, ps1::input::BTN_UP, "Up", "D-Pad Up"},
+    {SDLK_DOWN, ps1::input::BTN_DOWN, "Down", "D-Pad Down"},
+    {SDLK_LEFT, ps1::input::BTN_LEFT, "Left", "D-Pad Left"},
+    {SDLK_RIGHT, ps1::input::BTN_RIGHT, "Right", "D-Pad Right"},
+    {SDLK_z, ps1::input::BTN_CROSS, "Z", "Cross"},
+    {SDLK_x, ps1::input::BTN_CIRCLE, "X", "Circle"},
+    {SDLK_a, ps1::input::BTN_SQUARE, "A", "Square"},
+    {SDLK_s, ps1::input::BTN_TRIANGLE, "S", "Triangle"},
+    {SDLK_q, ps1::input::BTN_L1, "Q", "L1"},
+    {SDLK_w, ps1::input::BTN_R1, "W", "R1"},
+    {SDLK_e, ps1::input::BTN_L2, "E", "L2"},
+    {SDLK_r, ps1::input::BTN_R2, "R", "R2"},
+    {SDLK_c, ps1::input::BTN_L3, "C", "L3"},
+    {SDLK_v, ps1::input::BTN_R3, "V", "R3"},
+    {SDLK_RETURN, ps1::input::BTN_START, "Enter", "Start"},
+    {SDLK_RSHIFT, ps1::input::BTN_SELECT, "Right Shift", "Select"},
+    {SDLK_BACKSPACE, ps1::input::BTN_SELECT, "Backspace", "Select"},
+};
+
+static void printPadBindings() {
+  fmt::print("[pad] keyboard layout:\n");
+  for (const auto &b : kPadBindings)
+    fmt::print("[pad]   {:<12} -> {}\n", b.keyName, b.padName);
+  fmt::print("[pad]   {:<12} -> {}\n", "Esc", "quit");
+}
+
 static void mapKeyToButton(SDL_Keycode key, ps1::input::InputController &input,
                            bool pressed) {
-  using namespace ps1::input;
-  uint16_t btn = 0;
-  switch (key) {
-  case SDLK_UP:
-    btn = BTN_UP;
-    break;
-  case SDLK_DOWN:
-    btn = BTN_DOWN;
-    break;
-  case SDLK_LEFT:
-    btn = BTN_LEFT;
-    break;
-  case SDLK_RIGHT:
-    btn = BTN_RIGHT;
-    break;
-  case SDLK_z:
-    btn = BTN_CROSS;
-    break;
-  case SDLK_x:
-    btn = BTN_CIRCLE;
-    break;
-  case SDLK_a:
-    btn = BTN_SQUARE;
-    break;
-  case SDLK_s:
-    btn = BTN_TRIANGLE;
-    break;
-  case SDLK_q:
-    btn = BTN_L1;
-    break;
-  case SDLK_w:
-    btn = BTN_R1;
-    break;
-  case SDLK_e:
-    btn = BTN_L2;
-    break;
-  case SDLK_r:
-    btn = BTN_R2;
-    break;
-  case SDLK_RETURN:
-    btn = BTN_START;
-    break;
-  case SDLK_RSHIFT:
-  case SDLK_BACKSPACE:
-    btn = BTN_SELECT;
-    break;
-  default:
+  for (const auto &b : kPadBindings) {
+    if (b.key != key)
+      continue;
+    // Printed on every press: a button that does nothing in the game is a
+    // different problem from a button that never reached the pad at all.
+    if (pressed)
+      fmt::print(stderr, "[pad] {} -> {}\n", b.keyName, b.padName);
+    if (pressed)
+      input.press(b.button, 0);
+    else
+      input.release(b.button, 0);
     return;
   }
-  if (pressed)
-    input.press(btn, 0);
-  else
-    input.release(btn, 0);
 }
 
 // Constants
@@ -527,6 +524,7 @@ int main(int argc, char *argv[]) {
     return 1;
   }
   fmt::print("ps1Runtime -- PS1 Hardware Simulation (Full Integration)\n");
+  printPadBindings();
 
   // Initialize all hardware subsystems
 
