@@ -34,36 +34,45 @@ test that catches regressions.
 
 ---
 
-## Issue #1 — Crash Bandicoot: silent hang before first GPU command
+## Issue #1 — Crash Bandicoot: hash table walk hangs without GOOL interpreter
 
-**Status:** bypassed (workaround in place; permanent fix in roadmap PLANNING.md Fase 2)
+**Status:** bypassed (workaround `PS1_SKIP_31BF8=1`; permanent fix requires GOOL bytecode interpreter — PLANNING.md Fase 5)
 **Game:** Crash Bandicoot (USA, SLUS-00005)
 **Branch:** main
 
-### Current state (2026-05-17)
+### Current state (2026-05-26)
 
-Bypass shipped: env var `PS1_SKIP_31BF8=1` registers a runtime override that
-NOPs `func_80031BF8` (the display-mode state machine call that triggers the
-unpopulated hash table walk at `0x8005C530`). With the bypass plus the 4 new
-function entries added to `crash_recomp.toml` (jumptable targets that
-`ps1Analyzer` over-merged into surrounding functions), Crash now boots to the
-main loop and runs the full PsyQ render pipeline:
+Two architectural emitter/BIOS bugs that masqueraded as a Crash-specific hang
+were fixed on 2026-05-25 (commits `f5b038b` BIOS A-table indices and
+`5300604` SWL/SWR emitter argument order). NS init now succeeds (the runtime
+prints `"reading file system"` + `"Inited and Allocated 20 pages"` for the
+first time, and `chunk[25].size = 0x5ABF` is populated correctly). With the
+six `--add-func` entries persisted in `tools/regen_crash.sh` (jumptable
+targets `ps1Analyzer` over-merged into surrounding functions), zero
+`[DISPATCH] Unknown target` warnings appear during boot.
+
+The residual hang is now isolated to the `func_80015B58` 21-module loop
+walking the hash table at `0x8005C530`. The hash table base is not populated
+by the NS chunk subsystem (which is what the prior diagnostic history below
+hypothesised) — it is populated by the **GOOL bytecode interpreter** parsing
+per-module data. GOOL is a Naughty Dog DSL whose interpreter lives in the
+game binary; we do not implement it. This is scoped as Fase 5 of
+`PLANNING.md` (~15 h work).
+
+Until GOOL lands, `PS1_SKIP_31BF8=1` remains a permanent gap, not a
+temporary workaround. With the bypass plus the SWL/SWR fix, the render path
+runs:
 
 | Metric | Value |
 |---|---|
-| `libetc_VSync` calls/run | 881 (~58 fps over ~15s) |
-| `libgpu_DrawOTag` calls/run | 435 |
-| `libgte_MulMatrix` calls/run | 872 |
-| `libgpu_PutDispEnv` calls/run | 436 |
-| GP1 display swaps | 20 (double-buffer working) |
-| Suite | 557/557 green |
-| Unknown dispatch targets | 0 |
+| Suite | 569/569 green |
+| `[DISPATCH] Unknown target` | 0 |
+| GPU activity with `PS1_SKIP_31BF8=1` | 10 FillRect + DrawOTag + GTE 3D ops (race-prone) |
+| NS_init success | yes (post 2026-05-25) |
 
-The root cause (unpopulated hash table — see "Diagnostic history" below) is
-unchanged; the bypass is a workaround. The permanent fix is to port the NS
-(Naughty Sequence) chunk subsystem from c1c reference as `recomp_register_override`
-implementations for `func_80013B94` (`NS_FixupPage`) and `func_80013B30`
-(`NS_PageTransition`). See PLANNING.md Fase 2 for the roadmap.
+The race-prone qualifier reflects that the bypass NOPs a state-machine call
+the engine relies on for double-buffer cadence; some runs progress further
+than others. Reliable rendering still depends on GOOL.
 
 ### Symptom
 
@@ -279,36 +288,33 @@ Conclusion: patching the hash lookup is insufficient. Downstream code
 treats the returned pointer as a valid struct and dereferences several
 fields; substituting a sentinel propagates the failure deeper.
 
-### Real path forward (multi-session)
+### Real path forward — superseded 2026-05-25
 
-To get Crash past iter 17, one of the following is required:
+Options 1 and 2 are refuted. The 2026-05-25 SWL/SWR emitter fix
+(commit `5300604`) revealed that the missing "init function" was the
+existing NS chunk loader running on corrupted LBA arithmetic. Once the
+emitter emits stores correctly, NS_init populates `chunk[25]` and the
+NS-side data path is complete. The hash table at `0x8005C530` is
+**separate** — it is filled by the GOOL bytecode interpreter walking
+per-module records once the engine is running, which is what
+`PS1_SKIP_31BF8=1` short-circuits.
 
-1. **Ghidra-assisted analysis** of the Crash boot path (PC =
-   `0x8003E018` through to `func_80015B58`) to find the missing
-   initialization function that writes `0x8005C530`, then add it
-   via `ps1Analyzer --add-func <addr>`.
-2. **Implement Crash's data-file parser as an HLE override** that
-   reads the CD-loaded data at `0x80061A80` and pre-populates BSS
-   addresses including `0x8005C530`. Requires understanding the
-   data file format (one of the early sectors of Crash's binary).
-3. **Override `func_80031BF8` (display-mode setup) as a no-op**: this
-   is the iter-17 target. If we skip it entirely, the GTE loop
-   continues to iter 18..20 (mostly null pointers, skip) and exits.
-   The game then proceeds past this initialization phase -- though
-   subsequent code likely hangs on similar missing inits.
+The only path that removes the bypass is:
 
-Option 1 is the only one that produces a long-term-correct recompiler.
-Options 2 and 3 are TCC-specific workarounds.
+1. **Implement the GOOL bytecode interpreter** as a `recomp_register_override`
+   on the GOOL VM entry point. The opcode table and semantics are
+   documented in `../PS1Recomp-workspace/gooc/include/gool_ins.c`. The
+   `CrashEdit` and `gooc` repositories ship reference implementations.
+   Scoped as Fase 5 of `PLANNING.md` (~15 h).
+
+Option 3 (NOPing `func_80031BF8`) remains shipped as `PS1_SKIP_31BF8=1`
+but is now classified as a *gap* (depends on Fase 5), not a workaround.
 
 ### Independent open item
 
-**UBSan: misaligned 4-byte load** at `iso9660.cpp:29` and `:31`.
-
-#### Independent open item
-
 **UBSan: misaligned 4-byte load** at `iso9660.cpp:29` and `:31`. Reading
 `uint32_t` directly from a byte buffer that is not 4-aligned. Replace
-with `memcpy` into a stack `uint32_t`. Not related to the hang; surface
+with `memcpy` into a stack `uint32_t`. Not related to the hang; surfaces
 in any disc-mount path.
 
 ### Verification

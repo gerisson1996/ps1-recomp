@@ -147,6 +147,31 @@ ctest --test-dir build --output-on-failure -j$(nproc)
    ./build/ps1Runtime/ps1Runtime --config rayman_config.toml
    ```
 
+## Controls
+
+The keyboard stands in for a PS1 digital pad. The runtime prints this table on
+startup, so it is always visible in the log of a run.
+
+| Keyboard | PS1 pad | Keyboard | PS1 pad |
+|---|---|---|---|
+| Arrow keys | D-Pad | <kbd>Q</kbd> | L1 |
+| <kbd>Z</kbd> | Cross | <kbd>W</kbd> | R1 |
+| <kbd>X</kbd> | Circle | <kbd>E</kbd> | L2 |
+| <kbd>A</kbd> | Square | <kbd>R</kbd> | R2 |
+| <kbd>S</kbd> | Triangle | <kbd>C</kbd> | L3 |
+| <kbd>Enter</kbd> | Start | <kbd>V</kbd> | R3 |
+| <kbd>Right Shift</kbd> or <kbd>Backspace</kbd> | Select | <kbd>Esc</kbd> | quit |
+
+Each press is echoed to stderr as `[pad] <key> -> <button>`, which separates a
+button that reached the pad from one that never got there.
+
+### Memory cards
+
+Two cards are created under `memcards/` on first run, 128 KB each and formatted
+as a real card is. Set `[paths] memcard_dir` in the game config to put them
+somewhere else. A written sector is flushed to the file immediately, because
+shutdown skips destructors and a deferred write would be lost.
+
 ## How It Works
 
 ### Phase 1 -- Analysis (`ps1Analyzer`)
