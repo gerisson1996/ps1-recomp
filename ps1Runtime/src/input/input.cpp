@@ -1,4 +1,5 @@
 #include "runtime/input/input.h"
+#include "runtime/metrics.h"
 #include <fmt/format.h>
 
 namespace ps1::input {
@@ -7,18 +8,67 @@ namespace ps1::input {
 
 MemoryCard::MemoryCard() { reset(); }
 
-void MemoryCard::reset() {
-  data_.fill(0);
-  state_ = McState::Idle;
-  sectorAddr_ = 0;
-  byteCounter_ = 0;
-  checksum_ = 0;
+uint8_t MemoryCard::frameChecksum(const uint8_t *frame, std::size_t n) {
+  uint8_t x = 0;
+  for (std::size_t i = 0; i < n; i++)
+    x ^= frame[i];
+  return x;
+}
 
-  // Initialize memory card header (block 0)
-  // Magic: "MC" at offset 0
-  data_[0] = 'M';
-  data_[1] = 'C';
-  data_[0x7F] = 0x0E; // Checksum placeholder
+// Lay down block 0 exactly as a Sony card leaves it after formatting.
+// Without this the card reads back as blank and every game reports it
+// unformatted or absent.  Layout from psx-spx,
+// controllersandmemorycards.md "Memory Card Data Format".
+void MemoryCard::formatImage() {
+  data_.fill(0);
+
+  auto frame = [&](uint32_t index) { return data_.data() + index * SECTOR_SIZE; };
+
+  // Frame 0: header.  "MC", zeroes, checksum of everything above it.
+  uint8_t *hdr = frame(0);
+  hdr[0] = 'M';
+  hdr[1] = 'C';
+  hdr[SECTOR_SIZE - 1] = frameChecksum(hdr, SECTOR_SIZE - 1);
+
+  // Frames 1..15: directory, every block free and never used.
+  for (uint32_t i = 1; i <= 15; i++) {
+    uint8_t *d = frame(i);
+    std::memset(d, 0, SECTOR_SIZE);
+    d[0] = 0xA0; // free, freshly formatted
+    d[8] = 0xFF; // next block: none
+    d[9] = 0xFF;
+    d[SECTOR_SIZE - 1] = frameChecksum(d, SECTOR_SIZE - 1);
+  }
+
+  // Frames 16..35: broken sector list, all "none".
+  for (uint32_t i = 16; i <= 35; i++) {
+    uint8_t *d = frame(i);
+    std::memset(d, 0, SECTOR_SIZE);
+    std::memset(d, 0xFF, 4);
+    d[SECTOR_SIZE - 1] = frameChecksum(d, SECTOR_SIZE - 1);
+  }
+
+  // Frames 36..62: replacement data and unused, FFh-filled.
+  for (uint32_t i = 36; i <= 62; i++)
+    std::memset(frame(i), 0xFF, SECTOR_SIZE);
+
+  // Frame 63: write-test frame, same shape as the header.
+  uint8_t *wt = frame(63);
+  std::memset(wt, 0, SECTOR_SIZE);
+  wt[0] = 'M';
+  wt[1] = 'C';
+  wt[SECTOR_SIZE - 1] = frameChecksum(wt, SECTOR_SIZE - 1);
+}
+
+void MemoryCard::reset() {
+  formatImage();
+  cmd_ = Cmd::None;
+  step_ = 0;
+  lastIn_ = 0;
+  sectorAddr_ = 0;
+  checksum_ = 0;
+  flag_ = 0x08;
+  dirty_ = false;
 }
 
 bool MemoryCard::loadFromFile(const std::string &path) {
@@ -37,73 +87,177 @@ bool MemoryCard::saveToFile(const std::string &path) const {
   return file.good();
 }
 
+bool MemoryCard::attachFile(const std::string &path) {
+  backingPath_ = path;
+  if (loadFromFile(path))
+    return true;
+  // No file yet: keep the formatted image and write it out, so the card the
+  // game sees on this run is the one it will see on the next.
+  return saveToFile(path);
+}
+
+// Written through after every accepted sector so a crash, or the fast exit
+// that skips destructors, cannot lose a save.  A sector write is 128 bytes of
+// game data against a 128 KB file; a whole save file is 64 of them, which is
+// well inside what this costs.
+void MemoryCard::flush() {
+  if (!dirty_ || backingPath_.empty())
+    return;
+  if (saveToFile(backingPath_))
+    dirty_ = false;
+}
+
+// One byte of an SIO exchange.
+//
+// Each command is a fixed script of byte pairs; `step_` counts how far in we
+// are.  "(pre)" in the spec means the card echoes the byte it received last,
+// which is what `lastIn_` carries.  Sequences from psx-spx,
+// controllersandmemorycards.md "Memory Card Read/Write Commands".
 uint8_t MemoryCard::transfer(uint8_t dataIn) {
-  switch (state_) {
-  case McState::Idle:
-    if (dataIn == 0x81) { // Memory card access byte
-      state_ = McState::AwaitCommand;
-      return 0xFF; // Acknowledge flag
+  const uint8_t pre = lastIn_;
+  lastIn_ = dataIn;
+
+  if (!present_) {
+    cmd_ = Cmd::None;
+    return 0xFF;
+  }
+
+  if (cmd_ == Cmd::None) {
+    if (dataIn == 0x81) { // memory card address
+      cmd_ = Cmd::Await;
+      step_ = 0;
     }
     return 0xFF;
+  }
 
-  case McState::AwaitCommand:
+  if (cmd_ == Cmd::Await) {
+    step_ = 0;
     switch (dataIn) {
-    case 0x52: // Read
-      state_ = McState::AwaitAddrHi;
-      return 0x5A; // ID1
-    case 0x57:     // Write
-      state_ = McState::AwaitAddrHi;
-      return 0x5A;
+    case 0x52:
+      cmd_ = Cmd::Read;
+      break;
+    case 0x57:
+      cmd_ = Cmd::Write;
+      break;
+    case 0x53:
+      cmd_ = Cmd::GetId;
+      break;
     default:
-      state_ = McState::Idle;
+      cmd_ = Cmd::None;
+      if (ps1::metrics::enabled())
+        ps1::metrics::count("memcard.cmd.unknown");
       return 0xFF;
     }
+    // A save screen that shows nothing has two very different causes: the game
+    // never addressed the card, or it did and disliked the answer.  Counting
+    // the commands separates them without a guess.
+    if (ps1::metrics::enabled())
+      ps1::metrics::count(dataIn == 0x52   ? "memcard.cmd.read"
+                          : dataIn == 0x57 ? "memcard.cmd.write"
+                                           : "memcard.cmd.getid");
+    return flag_; // FLAG byte comes back with the command
+  }
 
-  case McState::AwaitAddrHi:
+  const uint32_t step = step_++;
+  const bool badSector = sectorAddr_ >= NUM_SECTORS;
+
+  if (cmd_ == Cmd::GetId) {
+    static const uint8_t reply[8] = {0x5A, 0x5D, 0x5C, 0x5D,
+                                     0x04, 0x00, 0x00, 0x80};
+    if (step >= 8) {
+      cmd_ = Cmd::None;
+      return 0xFF;
+    }
+    if (step == 7)
+      cmd_ = Cmd::None;
+    return reply[step];
+  }
+
+  if (cmd_ == Cmd::Read) {
+    switch (step) {
+    case 0:
+      return 0x5A; // ID1
+    case 1:
+      return 0x5D; // ID2
+    case 2:
+      sectorAddr_ = static_cast<uint16_t>(dataIn) << 8;
+      return 0x00;
+    case 3:
+      sectorAddr_ = static_cast<uint16_t>(sectorAddr_ | dataIn);
+      checksum_ = static_cast<uint8_t>(sectorAddr_ >> 8) ^
+                  static_cast<uint8_t>(sectorAddr_ & 0xFF);
+      return pre;
+    case 4:
+      return 0x5C; // command acknowledge 1
+    case 5:
+      return 0x5D; // command acknowledge 2
+    case 6:
+      // An out-of-range sector answers FFFFh and sends nothing further.
+      return badSector ? 0xFF : static_cast<uint8_t>(sectorAddr_ >> 8);
+    case 7:
+      if (badSector) {
+        cmd_ = Cmd::None;
+        return 0xFF;
+      }
+      return static_cast<uint8_t>(sectorAddr_ & 0xFF);
+    default:
+      break;
+    }
+    const uint32_t i = step - 8;
+    if (i < SECTOR_SIZE) {
+      const uint8_t v = data_[sectorAddr_ * SECTOR_SIZE + i];
+      checksum_ ^= v;
+      return v;
+    }
+    if (i == SECTOR_SIZE)
+      return checksum_;
+    cmd_ = Cmd::None;
+    return 0x47; // "G": read good
+  }
+
+  // Cmd::Write
+  switch (step) {
+  case 0:
+    return 0x5A;
+  case 1:
+    return 0x5D;
+  case 2:
     sectorAddr_ = static_cast<uint16_t>(dataIn) << 8;
-    state_ = McState::AwaitAddrLo;
-    return 0x5D; // ID2
-
-  case McState::AwaitAddrLo:
-    sectorAddr_ |= dataIn;
-    byteCounter_ = 0;
+    return 0x00;
+  case 3:
+    sectorAddr_ = static_cast<uint16_t>(sectorAddr_ | dataIn);
     checksum_ = static_cast<uint8_t>(sectorAddr_ >> 8) ^
                 static_cast<uint8_t>(sectorAddr_ & 0xFF);
-    state_ = McState::Reading;
-    return 0x00; // ACK MSB
-
-  case McState::Reading: {
-    uint32_t addr =
-        static_cast<uint32_t>(sectorAddr_) * SECTOR_SIZE + byteCounter_;
-    uint8_t val = (addr < CARD_SIZE) ? data_[addr] : 0xFF;
-    checksum_ ^= val;
-    byteCounter_++;
-    if (byteCounter_ >= SECTOR_SIZE) {
-      state_ = McState::Idle;
-    }
-    return val;
+    return pre;
+  default:
+    break;
   }
-
-  case McState::Writing: {
-    uint32_t addr =
-        static_cast<uint32_t>(sectorAddr_) * SECTOR_SIZE + byteCounter_;
-    if (addr < CARD_SIZE) {
-      data_[addr] = dataIn;
-    }
+  const uint32_t i = step - 4;
+  if (i < SECTOR_SIZE) {
+    writeBuf_[i] = dataIn;
     checksum_ ^= dataIn;
-    byteCounter_++;
-    if (byteCounter_ >= SECTOR_SIZE) {
-      state_ = McState::WriteAck;
-    }
-    return 0x00;
+    return pre;
   }
-
-  case McState::WriteAck:
-    state_ = McState::Idle;
-    return 0x47; // Good ("G")
+  if (i == SECTOR_SIZE) {
+    // The host's checksum byte.  Keep it; the verdict goes out at the end.
+    checksum_ ^= dataIn; // zero iff the host agrees with us
+    return pre;
   }
+  if (i == SECTOR_SIZE + 1)
+    return 0x5C;
+  if (i == SECTOR_SIZE + 2)
+    return 0x5D;
 
-  return 0xFF;
+  cmd_ = Cmd::None;
+  if (badSector)
+    return 0xFF; // bad sector
+  if (checksum_ != 0)
+    return 0x4E; // "N": bad checksum, nothing written
+  std::memcpy(data_.data() + sectorAddr_ * SECTOR_SIZE, writeBuf_, SECTOR_SIZE);
+  dirty_ = true;
+  flag_ = static_cast<uint8_t>(flag_ & ~0x08); // directory has now been touched
+  flush();
+  return 0x47; // "G": write good
 }
 
 // Input Controller
@@ -284,8 +438,15 @@ uint8_t InputController::processSioTransfer(uint8_t dataIn) {
     sioState_ = SioState::Idle;
     return port.analogLY;
 
-  case SioState::MemCardTransfer:
-    return memCards_[selectedPort_].transfer(dataIn);
+  case SioState::MemCardTransfer: {
+    const uint8_t out = memCards_[selectedPort_].transfer(dataIn);
+    // The card drops back to idle when a command's script runs out, so the
+    // port has to follow it -- otherwise the next 0x01 from the pad poll is
+    // fed to the card instead of starting a controller exchange.
+    if (!memCards_[selectedPort_].transferActive())
+      sioState_ = SioState::Idle;
+    return out;
+  }
   }
 
   return 0xFF;

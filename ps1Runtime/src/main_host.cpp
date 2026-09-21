@@ -552,6 +552,36 @@ int main(int argc, char *argv[]) {
   memory.setDMA(&dma);
   memory.setCDROM(&cdromCtrl);
   memory.setInput(&input);
+
+  // Back both memory card slots with files, so a save survives the run.
+  // Default location is `memcards/` beside the config; `[paths] memcard_dir`
+  // overrides it.  A missing file is created from a freshly formatted card.
+  {
+    std::filesystem::path cardDir = "memcards";
+    if (!config_path.empty()) {
+      try {
+        auto cfg = toml::parse(config_path);
+        if (cfg.contains("paths")) {
+          auto &paths = toml::find(cfg, "paths");
+          if (paths.contains("memcard_dir"))
+            cardDir = toml::find<std::string>(paths, "memcard_dir");
+        }
+      } catch (const std::exception &) {
+        // Paths are optional; the default stands.
+      }
+    }
+    std::error_code ec;
+    std::filesystem::create_directories(cardDir, ec);
+    for (int slot = 0; slot < 2; ++slot) {
+      const auto file = cardDir / fmt::format("card{}.mcd", slot + 1);
+      auto &card = input.getMemoryCard(slot);
+      if (card.attachFile(file.string()))
+        fmt::print("[MemCard] slot {} -> {}\n", slot + 1, file.string());
+      else
+        fmt::print(stderr, "[MemCard] slot {}: could not use {}\n", slot + 1,
+                   file.string());
+    }
+  }
   memory.setMDEC(&mdec);
   memory.setTimers(&timers);
   memory.setInterruptController(&irqCtrl);
