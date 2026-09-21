@@ -1,3 +1,4 @@
+#include <fmt/format.h>
 #include "runtime/psyq/psyq_pad.h"
 #include "runtime/bios/bios.h"
 #include "runtime/input/input.h"
@@ -147,8 +148,22 @@ void hle_libetc_PadRead(recomp_context *ctx) {
   writePadBuffer(ctx, input, g_state.buf1Addr, 0);
   writePadBuffer(ctx, input, g_state.buf2Addr, 1);
 
-  ctx->r[V0] = (static_cast<uint32_t>(port2) << 16) |
-               static_cast<uint32_t>(port1);
+  // PadRead returns the COMPLEMENT of the buffer, so a set bit means pressed:
+  //
+  //     u_long PadRead(int id) { PAD_dr(id); return ~pad_buf; }
+  //
+  // (PsyQ libetc, per the psyz decompilation's src/libetc/pad.c.)  The
+  // buffer itself stays active-low; only this entry point flips it, which is
+  // why PADLup/PADstart and friends are written as `if (pad & PADLup)`.
+  //
+  // Handing back the active-low word instead made every direction read as
+  // held: Crash's PAD_Update filters opposite directions with
+  // `if (pad & UP) pad &= ~DOWN`, which on an un-inverted word collapses to
+  // the same value whether or not anything is pressed -- so no press edge
+  // ever appeared, the menu cursor never moved, and the map camera spun as
+  // though a direction were stuck down.
+  ctx->r[V0] = ~((static_cast<uint32_t>(port2) << 16) |
+                 static_cast<uint32_t>(port1));
 }
 
 // Test-only state hooks

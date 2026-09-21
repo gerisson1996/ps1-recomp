@@ -74,12 +74,26 @@ TEST_F(PsyqPadTest, PadStartComStopComReturnZero) {
   EXPECT_EQ(ctx.r[V0], 0u);
 }
 
-// PadRead -- packed (port2 << 16) | port1, active-low
+// PadRead -- packed (port2 << 16) | port1, ACTIVE-HIGH (set bit = pressed)
+//
+// Two different SDK entry points are called "pad read" and they disagree on
+// polarity.  BIOS B(0x16) fills the pad buffer and leaves it active-low; the
+// libetc function this HLE stands in for calls that and returns its
+// complement:
+//
+//     u_long PadRead(int id) { PAD_dr(id); return ~pad_buf; }
+//
+// (psyz decompilation, src/libetc/pad.c.)  Crash relies on the complement:
+// its PAD_Update filters opposite directions with `if (pad & UP) pad &= ~DOWN`
+// on the RETURN value, which is only meaningful when a set bit means pressed.
+// Returning the active-low word instead made idle and Down-held produce the
+// same 0x9FFF, so no press edge ever existed -- the menu cursor would not
+// move and the map camera spun as if a direction were stuck.
 
-TEST_F(PsyqPadTest, PadReadIdleReturnsAllOnes) {
-  // No buttons pressed on either port -> 0xFFFFFFFF.
+TEST_F(PsyqPadTest, PadReadIdleReturnsZero) {
+  // No buttons pressed on either port -> no bits set.
   hle_libetc_PadRead(&ctx);
-  EXPECT_EQ(ctx.r[V0], 0xFFFFFFFFu);
+  EXPECT_EQ(ctx.r[V0], 0u);
 }
 
 // PadRead's halves are active-low but byte-swapped relative to
@@ -91,17 +105,17 @@ constexpr uint16_t PAD_RDOWN = 0x0040;  // BTN_CROSS  (controller bit 14)
 constexpr uint16_t PAD_RLEFT = 0x0080;  // BTN_SQUARE (controller bit 15)
 constexpr uint16_t PAD_RRIGHT = 0x0020; // BTN_CIRCLE (controller bit 13)
 
-TEST_F(PsyqPadTest, PadReadPressedBitsAreCleared) {
-  // Press CROSS on port 0 -> PADRdown cleared in the low half.
+TEST_F(PsyqPadTest, PadReadPressedBitsAreSet) {
+  // Press CROSS on port 0 -> PADRdown set in the low half, nothing else.
   input.press(input::BTN_CROSS, 0);
   hle_libetc_PadRead(&ctx);
-  EXPECT_EQ(ctx.r[V0], 0xFFFFFFFFu & ~static_cast<uint32_t>(PAD_RDOWN));
+  EXPECT_EQ(ctx.r[V0], static_cast<uint32_t>(PAD_RDOWN));
 
-  // Add START on port 1 -> PADstart cleared in the high half.
+  // Add START on port 1 -> PADstart set in the high half.
   input.press(input::BTN_START, 1);
   hle_libetc_PadRead(&ctx);
-  uint32_t expected = static_cast<uint32_t>(0xFFFFu & ~PAD_RDOWN) |
-                      (static_cast<uint32_t>(0xFFFFu & ~PAD_START) << 16);
+  uint32_t expected = static_cast<uint32_t>(PAD_RDOWN) |
+                      (static_cast<uint32_t>(PAD_START) << 16);
   EXPECT_EQ(ctx.r[V0], expected);
 }
 
@@ -117,7 +131,7 @@ TEST_F(PsyqPadTest, PadReadUsesPsyqButtonMaskNotControllerBitLayout) {
   hle_libetc_PadRead(&ctx);
 
   const uint16_t low = static_cast<uint16_t>(ctx.r[V0] & 0xFFFFu);
-  EXPECT_EQ(static_cast<uint16_t>(~low & 0xFFFFu), PAD_START);
+  EXPECT_EQ(low, PAD_START);
   // The raw controller bit must NOT be what the game sees.
   EXPECT_NE(static_cast<uint16_t>(~low & 0xFFFFu),
             static_cast<uint16_t>(input::BTN_START));
@@ -141,29 +155,29 @@ TEST_F(PsyqPadTest, PadReadPort0IsLowHalfPerRetailPadUpdateDisassembly) {
   uint16_t highHalf = static_cast<uint16_t>((ctx.r[V0] >> 16) & 0xFFFFu);
 
   // CROSS (port 0) must land in the low half, not the high half.
-  EXPECT_EQ(lowHalf, static_cast<uint16_t>(0xFFFFu & ~PAD_RDOWN));
-  EXPECT_NE(highHalf, static_cast<uint16_t>(0xFFFFu & ~PAD_RDOWN));
+  EXPECT_EQ(lowHalf, PAD_RDOWN);
+  EXPECT_NE(highHalf, PAD_RDOWN);
 
   // SQUARE (port 1) must land in the high half, not the low half.
-  EXPECT_EQ(highHalf, static_cast<uint16_t>(0xFFFFu & ~PAD_RLEFT));
-  EXPECT_NE(lowHalf, static_cast<uint16_t>(0xFFFFu & ~PAD_RLEFT));
+  EXPECT_EQ(highHalf, PAD_RLEFT);
+  EXPECT_NE(lowHalf, PAD_RLEFT);
 }
 
 TEST_F(PsyqPadTest, PadReadReflectsRelease) {
   input.press(input::BTN_CIRCLE, 0);
   hle_libetc_PadRead(&ctx);
-  EXPECT_EQ(ctx.r[V0] & 0xFFFFu, static_cast<uint32_t>(0xFFFFu & ~PAD_RRIGHT));
+  EXPECT_EQ(ctx.r[V0] & 0xFFFFu, static_cast<uint32_t>(PAD_RRIGHT));
 
   input.release(input::BTN_CIRCLE, 0);
   hle_libetc_PadRead(&ctx);
-  EXPECT_EQ(ctx.r[V0], 0xFFFFFFFFu);
+  EXPECT_EQ(ctx.r[V0], 0u);
 }
 
 TEST_F(PsyqPadTest, PadReadFallsBackWhenNoBackend) {
   // Detach the input controller -- bios accessor returns nullptr.
   bios->setInputController(nullptr);
   hle_libetc_PadRead(&ctx);
-  EXPECT_EQ(ctx.r[V0], 0xFFFFFFFFu);
+  EXPECT_EQ(ctx.r[V0], 0u); // no backend reads as "nothing pressed"
 }
 
 // PadInitDirect -- 34-byte status buffer refresh
