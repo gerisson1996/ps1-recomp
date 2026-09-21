@@ -2,7 +2,10 @@
 #include <algorithm>
 #include <cmath>
 #include <cstring>
+#include "runtime/metrics.h"
 #include <fmt/format.h>
+#include <string>
+#include <vector>
 
 namespace ps1::spu {
 
@@ -47,6 +50,32 @@ void SPU::reset() {
 
 // Register I/O
 
+// Per-voice census.  Sound effects and music use disjoint voice ranges in
+// Crash, so "which voices ever get programmed, and which ever get keyed on" is
+// the one measurement that separates a music driver that plays nothing from a
+// music driver that never runs.  Names are built once, off the hot path.
+namespace {
+const std::string &voiceStartMetric(uint32_t voice) {
+  static const std::vector<std::string> names = [] {
+    std::vector<std::string> v;
+    for (uint32_t i = 0; i < NUM_VOICES; i++)
+      v.push_back(fmt::format("spu.voice_start.{:02}", i));
+    return v;
+  }();
+  return names[voice];
+}
+
+const std::string &voiceKeyOnMetric(uint32_t voice) {
+  static const std::vector<std::string> names = [] {
+    std::vector<std::string> v;
+    for (uint32_t i = 0; i < NUM_VOICES; i++)
+      v.push_back(fmt::format("spu.key_on.{:02}", i));
+    return v;
+  }();
+  return names[voice];
+}
+} // namespace
+
 void SPU::writeRegister(uint32_t addr, uint16_t val) {
   std::lock_guard<std::mutex> lock(mutex_);
   uint32_t offset = addr - 0x1F801C00;
@@ -69,6 +98,12 @@ void SPU::writeRegister(uint32_t addr, uint16_t val) {
       break;
     case 0x06:
       v.startAddr = val;
+      // Per-voice census.  Sound effects and music use disjoint voice ranges
+      // in Crash, so "which voices ever get programmed, and which ever get
+      // keyed on" is the one measurement that separates a silent music driver
+      // from a music driver that never runs at all.
+      if (ps1::metrics::enabled())
+        ps1::metrics::count(voiceStartMetric(voiceIdx));
       break;
     case 0x08:
       v.adsrLo = val;
@@ -716,8 +751,11 @@ void SPU::generateSamples(int16_t *outputBuffer, uint32_t numSamples) {
   // out silent.  The real fix is per-sample retirement inside the mixer; until
   // then this is the variant that actually produces sound.
   for (uint32_t i = 0; i < NUM_VOICES; i++) {
-    if (keyOnLatch_ & (1u << i))
+    if (keyOnLatch_ & (1u << i)) {
       keyOnVoice(i);
+      if (ps1::metrics::enabled())
+        ps1::metrics::count(voiceKeyOnMetric(i));
+    }
     else if (keyOffLatch_ & (1u << i))
       keyOffVoice(i);
   }

@@ -2,6 +2,7 @@
 #include "runtime/memory.h"
 #include "runtime/psyq/psyq_hle.h"
 #include "runtime/psyq/psyq_registry.h"
+#include "runtime/metrics.h"
 #include "runtime/psyq/psyq_state.h"
 
 #include <cstdint>
@@ -266,6 +267,14 @@ void hle_libgpu_VSyncCallback(recomp_context *ctx) {
   uint32_t prev = slot;
   slot = ctx->r[A0];
   ctx->r[V0] = prev;
+  // One slot, and PsyQ games register more than one per-frame hook through
+  // it.  Counting the distinct handlers registered says whether anything is
+  // being displaced -- the sound driver's tick is installed this way.
+  if (ps1::metrics::enabled()) {
+    ps1::metrics::count(fmt::format("psyq.vsync_cb.{:08X}", ctx->r[A0]));
+    if (prev != 0 && prev != ctx->r[A0])
+      ps1::metrics::count(fmt::format("psyq.vsync_cb_displaced.{:08X}", prev));
+  }
 }
 
 // SetVideoMode(mode): 0=NTSC, 1=PAL. Stores in module state, returns prev.
