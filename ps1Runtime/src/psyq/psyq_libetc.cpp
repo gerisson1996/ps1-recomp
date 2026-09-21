@@ -1,6 +1,8 @@
 #include "runtime/psyq/psyq_libetc.h"
 #include "runtime/memory.h"
 #include "runtime/psyq/psyq_registry.h"
+#include "runtime/metrics.h"
+#include <fmt/format.h>
 #include "runtime/psyq/psyq_state.h"
 
 #include <cstdint>
@@ -29,9 +31,18 @@ inline std::size_t clampSlot(uint32_t n) {
 // is load-bearing: PSY-Q boilerplate checks it to detect init failure and
 // aborts the main loop when it sees zero.
 void hle_libetc_ResetCallback(recomp_context *ctx) {
+  // ResetCallback *starts* the callback module; it does not forget what the
+  // game registered:
+  //
+  //     int ResetCallback(void) { return D_800B7080->start(); }
+  //
+  // (PsyQ libetc, psyz decompilation src/libetc/intr.c.)  Clearing the slots
+  // here was wrong and load-bearing: `PadInit` calls ResetCallback, so every
+  // pad re-init silently unregistered Crash's Timer0 sound tick.  With the
+  // tick gone the drain had nothing to dispatch, `DeliverEvent(0xF0000009,
+  // 0x20)` stopped firing, and the level loader's `TestEvent(9)` spun forever
+  // -- measured at 15 million polls against 9 hits.
   auto &s = psyq_state();
-  for (auto &cb : s.intrCallback) cb = 0;
-  for (auto &cb : s.dmaCallback)  cb = 0;
   s.callbacksEnabled = true;
   ctx->r[V0] = 1;
 }
@@ -72,6 +83,15 @@ void hle_libetc_InterruptCallback(recomp_context *ctx) {
   uint32_t prev = s.intrCallback[n];
   s.intrCallback[n] = ctx->r[A1];
   ctx->r[V0] = prev;
+  // Which IRQ lines a game actually hooks, and with what.  There is one slot
+  // per line, so a second registration on the same line silently displaces
+  // the first -- and the drain only ticks lines 4..6, so a handler parked
+  // anywhere else never runs at all.
+  if (ps1::metrics::enabled()) {
+    ps1::metrics::count(fmt::format("psyq.intr_cb.{}.{:08X}", n, ctx->r[A1]));
+    if (prev != 0 && prev != ctx->r[A1])
+      ps1::metrics::count(fmt::format("psyq.intr_cb_displaced.{}.{:08X}", n, prev));
+  }
 }
 
 void hle_libetc_DMACallback(recomp_context *ctx) {
