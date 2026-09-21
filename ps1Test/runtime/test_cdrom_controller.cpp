@@ -1,5 +1,7 @@
 #include "runtime/cdrom/cdrom_controller.h"
 #include <gtest/gtest.h>
+#include <array>
+#include <cstring>
 
 using namespace ps1::cdrom;
 
@@ -84,4 +86,77 @@ TEST_F(CdromControllerTest, BcdConversion) {
   EXPECT_EQ(CdromController::toBcd(59), 0x59);
   EXPECT_EQ(CdromController::fromBcd(0x59), 59);
   EXPECT_EQ(CdromController::fromBcd(0x10), 10);
+}
+
+// Sector hand-off
+//
+// `tick` runs on the render thread and memcpy's the next sector over the
+// controller's buffer.  A consumer that held the `getSectorBuffer` pointer and
+// read it word by word could therefore splice two sectors together, which in
+// Crash produced a corrupt NSF page and sent the LZ decompressor past the end
+// of its output buffer.  `takeSectorPayload` copies and clears in one locked
+// step so a consumer always sees exactly one sector.
+
+namespace {
+// Serves sector N filled with the byte N, so a spliced read is visible as a
+// buffer that is not uniform.
+class CountingFs : public ps1::cdrom::VirtualFs {
+public:
+  std::optional<ps1::cdrom::Sector> readSector(uint32_t lba) override {
+    ps1::cdrom::Sector s{};
+    std::memset(s.raw, static_cast<int>(lba & 0xFF), ps1::cdrom::SECTOR_SIZE_RAW);
+    ++served;
+    return s;
+  }
+  int served = 0;
+};
+
+// Drive the controller until one sector is buffered.
+void readOneSector(ps1::cdrom::CdromController &cdrom) {
+  cdrom.writeRegister(0x1F801800, 0x00);
+  cdrom.writeRegister(0x1F801802, 0x00); // minute
+  cdrom.writeRegister(0x1F801802, 0x02); // second
+  cdrom.writeRegister(0x1F801802, 0x00); // sector
+  cdrom.writeRegister(0x1F801801, 0x02); // SetLoc
+  cdrom.tick(100000);
+  cdrom.writeRegister(0x1F801801, 0x06); // ReadN
+  for (int i = 0; i < 40 && !cdrom.hasSectorReady(); ++i)
+    cdrom.tick(100000);
+}
+} // namespace
+
+TEST_F(CdromControllerTest, TakeSectorPayloadReturnsZeroWhenNoneReady) {
+  uint8_t buf[16] = {0xAA};
+  EXPECT_EQ(cdrom.takeSectorPayload(buf, sizeof buf), 0u);
+  EXPECT_EQ(buf[0], 0xAA) << "must not touch the destination";
+}
+
+TEST_F(CdromControllerTest, TakeSectorPayloadCopiesUserDataAndConsumesTheSector) {
+  CountingFs fs;
+  cdrom.attachVirtualFs(&fs);
+  readOneSector(cdrom);
+  ASSERT_TRUE(cdrom.hasSectorReady());
+
+  std::array<uint8_t, ps1::cdrom::SECTOR_SIZE_RAW> payload{};
+  const uint32_t got = cdrom.takeSectorPayload(payload.data(), payload.size());
+
+  // Default mode is 2048-byte sectors: user data starts 24 bytes in.
+  EXPECT_EQ(got, ps1::cdrom::SECTOR_SIZE_RAW - 24u);
+  for (uint32_t i = 0; i < got; ++i)
+    ASSERT_EQ(payload[i], payload[0]) << "byte " << i << " came from elsewhere";
+
+  EXPECT_FALSE(cdrom.hasSectorReady()) << "the take must consume the sector";
+  EXPECT_EQ(cdrom.takeSectorPayload(payload.data(), payload.size()), 0u);
+}
+
+TEST_F(CdromControllerTest, TakeSectorPayloadHonoursTheDestinationSize) {
+  CountingFs fs;
+  cdrom.attachVirtualFs(&fs);
+  readOneSector(cdrom);
+  ASSERT_TRUE(cdrom.hasSectorReady());
+
+  uint8_t small[64];
+  std::memset(small, 0, sizeof small);
+  EXPECT_EQ(cdrom.takeSectorPayload(small, sizeof small), sizeof small);
+  EXPECT_FALSE(cdrom.hasSectorReady());
 }

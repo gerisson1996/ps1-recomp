@@ -121,7 +121,148 @@ public:
   // Drain pending event callbacks -- called from game thread at yield points
   // (testEvent, waitEvent, VSync, etc.) to safely dispatch mode-0x1000
   // handlers.
-  void drainPendingCallbacks();
+  //
+  // This is also the yield point the recompiler injects at *every backward
+  // branch*, so it runs orders of magnitude more often than it has work to
+  // do.  The slow path below takes three mutexes and half a dozen atomic
+  // read-modify-writes; paying that per loop iteration costs more than the
+  // emulated loop body.  So the entry point is a lock-free gate over the
+  // same set of pending flags, and the real work lives in
+  // `drainPendingCallbacksSlow`.  Set `PS1_DRAIN_GATE=0` to bypass the gate
+  // and always take the slow path (A/B measurement).
+  void drainPendingCallbacks() {
+    ++drainCalls_;
+    if ((++pumpCounter_ & 0x3FFu) == 0)
+      pumpVBlank();
+    if (spGuard_)
+      checkStackPointer();
+    // A yield point is only safe where the guest has a usable stack.
+    //
+    // Hand-written PS1 assembly is free to save the whole register file to a
+    // context block and then use $sp as a general-purpose register -- Crash's
+    // model transform `func_80035E10` parks $sp in the scratchpad and packs
+    // GTE operands through it for the length of the routine.  On hardware an
+    // interrupt there is harmless: the exception handler runs on its own
+    // stack.  Here, dispatching a callback would run recompiled code that
+    // does `addiu $sp,-32; sw $ra,24($sp)` against a data value, so its
+    // locals land in nowhere -- measured: the sound tick's loop counter never
+    // read back what it wrote and span 1.4 billion times, wedging the game
+    // thread behind the re-entrancy guard.
+    //
+    // Deferring costs nothing: the callback stays queued and is dispatched at
+    // the next yield point that does have a stack, a few microseconds later.
+    if (!guestStackUsable()) {
+      ++drainDeferredNoStack_;
+      return;
+    }
+    if (drainGate_ && vsyncPtr_ != nullptr &&
+        cdEventQueueDepth_.load(std::memory_order_relaxed) == 0 &&
+        cdIntPending_.load(std::memory_order_relaxed) == 0 &&
+        cdExceptionPending_.load(std::memory_order_relaxed) == 0 &&
+        vblankExceptionPending_.load(std::memory_order_relaxed) == 0 &&
+        !eventSystem_.hasPendingCallbacks() &&
+        vsyncPtr_->load(std::memory_order_relaxed) == lastIntrTickFrame_) {
+      return;
+    }
+    drainPendingCallbacksSlow();
+  }
+
+  // Yield point that keeps the host clock running but delivers nothing.
+  //
+  // Inside a routine that must not be interrupted, the guest still needs the
+  // VBlank pump to advance -- the decompressor runs for millions of iterations
+  // and stopping the clock there wedges every VSync wait behind it. What it
+  // cannot tolerate is a dispatched callback: it finishes with the output
+  // count complete but a pending run count, and its exit condition can then
+  // never be met. So pump, check the stack, dispatch nothing.
+  void pumpOnly() {
+    ++drainCalls_;
+    if ((++pumpCounter_ & 0x3FFu) == 0)
+      pumpVBlank();
+    if (spGuard_)
+      checkStackPointer();
+  }
+
+  void drainPendingCallbacksSlow();
+
+  // Host VBlank pump, run on the GAME thread.
+  //
+  // The 60 Hz tick used to live on its own thread, which meant the host
+  // advanced the guest clock, refreshed the pad buffer and snapshotted VRAM
+  // while recompiled code was running -- concurrent access to guest state that
+  // showed up as ~180 KB of globals turning to garbage in a single frame,
+  // roughly one run in four.  Proven by A/B: adding any work to that thread
+  // made the corruption disappear.
+  //
+  // Driving the same tick from the game thread's own yield points removes the
+  // concurrency without losing the clock during spin-waits: loops that never
+  // call VSync (the NSF loader is one) still reach a backward branch, and the
+  // counter below keeps the pump cheap enough for that path.
+  void setVBlankPump(std::function<void()> pump) {
+    vblankPump_ = std::move(pump);
+  }
+  void pumpVBlank() {
+    if (vblankPump_)
+      vblankPump_();
+  }
+
+  // Global $sp watchpoint (`PS1_SP_GUARD=1`).
+  //
+  // The recompiler injects a drain at every backward branch, which makes this
+  // the one place every loop in the program passes through -- so validating
+  // the guest stack pointer here catches corruption at the first loop after
+  // it happens, anywhere, without knowing in advance which function to watch.
+  // A guest $sp must land in RAM or the scratchpad; anything else means a
+  // recompilation bug (a clobbered $sp save/restore, a bad computed jump)
+  // rather than game behaviour.
+  void checkStackPointer() {
+    const uint32_t sp = ctx_.r29;
+    const uint32_t masked = sp & 0x1FFFFFFFu;
+    if (masked < 0x200000u ||
+        (masked >= 0x1F800000u && masked < 0x1F800400u))
+      return;
+    reportBadStackPointer(sp);
+  }
+
+  // Can a dispatched callback push a frame at the current guest $sp?
+  //
+  // Main RAM only: the 1 KiB scratchpad is small enough that routines which
+  // park $sp there are using it as working storage, so a callback frame would
+  // overwrite live data rather than fail loudly.  A frame needs headroom
+  // below $sp, hence the floor.
+  bool guestStackUsable() const {
+    const uint32_t masked = ctx_.r29 & 0x1FFFFFFFu;
+    return masked >= 0x400u && masked < 0x200000u;
+  }
+
+  // Diagnostic snapshot (PS1_METRICS).  Written on the game thread, read
+  // from the reporting thread.
+  struct DrainMetrics {
+    uint64_t calls;   // every injected yield point
+    uint64_t slow;    // reached the slow path
+    uint64_t nested;  // refused by the re-entrancy guard
+    uint64_t dispatched;
+    uint64_t noStack; // deferred: guest $sp was not a usable stack
+  };
+  DrainMetrics drainMetrics() const {
+    return {drainCalls_, drainSlow_, drainNested_, drainDispatched_,
+            drainDeferredNoStack_};
+  }
+  const EventSystem &eventSystem() const { return eventSystem_; }
+
+  /// Re-entrancy guard for `drainPendingCallbacks`.
+  ///
+  /// A drained callback is recompiled game code, and the recompiler injects a
+  /// drain at every backward branch -- so a callback with a loop in it calls
+  /// back into the drain, which dispatches the same callback again. Measured in
+  /// Crash Bandicoot: the sound-engine tick `func_800466A0` re-entered without
+  /// bound, 85 million drain calls against 186 thousand real yield points, and
+  /// the game thread never returned to its main loop.
+  ///
+  /// Hardware has the same rule -- an interrupt handler does not re-enter the
+  /// dispatcher -- so refusing the nested call is the faithful behaviour, not a
+  /// workaround.
+  bool draining_ = false;
 
   // BSS mirrors for legacy MIPS polling.  Phase 2.3/2.4 retired the BSS
   // writes of cd_sync_byte / cd_ready_byte in favor of `psyq_state()`
@@ -186,6 +327,40 @@ private:
   // does not contend with normal game-thread work.
   std::mutex cdEventQueueMtx_;
   std::queue<uint8_t> cdEventQueue_;
+
+  // Lock-free mirror of `cdEventQueue_.size()`, written only under
+  // `cdEventQueueMtx_`.  Lets the drain gate skip the lock when idle.
+  std::atomic<std::size_t> cdEventQueueDepth_{0};
+
+  // Drain gate + accounting.  `vsyncPtr_` caches
+  // `&psyq_state().vsyncCounter` so the gate does not pay for the
+  // singleton's initialisation guard; it is null until the first slow-path
+  // call, which forces the first drain through the slow path.
+  const bool drainGate_ = drainGateEnabled();
+  std::atomic<uint32_t> *vsyncPtr_ = nullptr;
+  static bool drainGateEnabled();
+
+  const bool spGuard_ = spGuardEnabled();
+  static bool spGuardEnabled();
+  // Out-of-line so the host backtrace has a real frame to walk from; the
+  // first few hits print where the recompiled code was when $sp went bad.
+  [[gnu::noinline]] void reportBadStackPointer(uint32_t sp);
+  unsigned badSpReports_ = 0;
+
+  // Counters are game-thread-only writes; the reporting thread reads them
+  // without synchronisation, which is why they are plain integers read
+  // through a value-copy snapshot rather than atomics (a torn read costs a
+  // wrong diagnostic line, never behaviour).
+  uint64_t drainCalls_ = 0;
+  uint64_t drainSlow_ = 0;
+  uint64_t drainNested_ = 0;
+  uint64_t drainDispatched_ = 0;
+  uint64_t drainDeferredNoStack_ = 0;
+
+  std::function<void()> vblankPump_;
+  // Yield points are hit tens of millions of times a second, so the pump is
+  // rate-limited by a plain counter rather than a clock read.
+  uint32_t pumpCounter_ = 0;
 
   // Deferred CD exception -- set by triggerCdromEvent when a B0:0x19 handler
   // is registered.  Consumed by drainPendingCallbacks, which calls

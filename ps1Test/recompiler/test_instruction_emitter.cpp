@@ -197,6 +197,36 @@ TEST(InstructionEmitter, UnalignedStoreArgOrder) {
       << "DO_SWR must receive rt before addr; got: " << swr;
 }
 
+// `Memory::read8`/`read16` return unsigned, so an emitted load carries no sign
+// on its own -- the cast in the emitted expression is what distinguishes LB/LH
+// from LBU/LHU. Without it every signed byte/halfword load zero-extends.
+//
+// Measured in Crash Bandicoot: the camera matrix built by func_80017A14 is
+// `m = -(5*lh) >> 3` per element. With the halfword zero-extended, `lh` = -903
+// read as 64633 turned m[1][0] into 25140 instead of 564 -- six times over the
+// 4096 = 1.0 scale. The GTE then projected every vertex behind the camera, SZ
+// clamped to 0, the perspective divide saturated, and 99.96% of the game's
+// triangles came out degenerate.
+TEST(InstructionEmitter, SignedByteAndHalfwordLoadsSignExtend) {
+  auto emitter = makeEmitter();
+
+  // LB $v0, 4($a0) -- opcode 0x20
+  auto lb = emitter.emitInstruction(MipsDecoder::decode(encI(0x20, 4, 2, 4)), 0);
+  EXPECT_NE(lb.find("(int8_t)MEM_READ8"), std::string::npos)
+      << "LB must sign-extend; got: " << lb;
+
+  // LH $v0, 4($a0) -- opcode 0x21
+  auto lh = emitter.emitInstruction(MipsDecoder::decode(encI(0x21, 4, 2, 4)), 0);
+  EXPECT_NE(lh.find("(int16_t)MEM_READ16"), std::string::npos)
+      << "LH must sign-extend; got: " << lh;
+
+  // LBU/LHU stay unsigned.
+  auto lbu = emitter.emitInstruction(MipsDecoder::decode(encI(0x24, 4, 2, 4)), 0);
+  EXPECT_NE(lbu.find("(uint8_t)MEM_READ8"), std::string::npos) << lbu;
+  auto lhu = emitter.emitInstruction(MipsDecoder::decode(encI(0x25, 4, 2, 4)), 0);
+  EXPECT_NE(lhu.find("(uint16_t)MEM_READ16"), std::string::npos) << lhu;
+}
+
 // Branch Tests
 
 TEST(InstructionEmitter, BranchBEQ) {

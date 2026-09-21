@@ -1,5 +1,6 @@
 #include "runtime/dma/dma.h"
 #include "runtime/memory.h"
+#include "runtime/spu/spu.h"
 #include <gtest/gtest.h>
 
 using namespace ps1;
@@ -104,4 +105,33 @@ TEST_F(DmaTest, BlockTransferDoesntCrash) {
   // Don't actually trigger - just test register state
   EXPECT_EQ(dma.readRegister(0x1F8010C0), 0x00001000u);
   EXPECT_EQ(dma.readRegister(0x1F8010C4), 0x00010010u);
+}
+
+// SPU channel (Ch4) RAM -> sound RAM.
+//
+// Regression: the transfer used to address sound RAM by the loop index, so
+// every upload restarted at sound RAM 0 and overwrote the previous one. The
+// voices read from their own start addresses, far from zero, and found
+// silence. The destination is the SPU's transfer address register, which the
+// game programs before starting the DMA and which auto-increments.
+TEST_F(DmaTest, SpuBlockTransferHonoursTheProgrammedTransferAddress) {
+  spu::SPU spu;
+  spu.reset();
+  dma.setSPU(&spu);
+
+  spu.writeRegister(0x1F801DA6, 0x80); // sound RAM byte address 0x400
+
+  mem.write32(0x1000, 0x22221111);
+  mem.write32(0x1004, 0x44443333);
+
+  dma.writeRegister(0x1F8010F0, 0x08888888); // enable Ch4
+  dma.writeRegister(0x1F8010C0, 0x00001000); // MADR
+  dma.writeRegister(0x1F8010C4, 0x00010002); // 1 block of 2 words
+  dma.writeRegister(0x1F8010C8, 0x11000001); // from RAM, burst, trigger+start
+
+  EXPECT_EQ(spu.readSoundRam(0x400), 0x1111);
+  EXPECT_EQ(spu.readSoundRam(0x402), 0x2222);
+  EXPECT_EQ(spu.readSoundRam(0x404), 0x3333);
+  EXPECT_EQ(spu.readSoundRam(0x406), 0x4444);
+  EXPECT_EQ(spu.readSoundRam(0x000), 0x0000) << "must not restart at zero";
 }

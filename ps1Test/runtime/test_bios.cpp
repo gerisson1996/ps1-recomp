@@ -1,4 +1,5 @@
 #include "runtime/bios/bios.h"
+#include "runtime/psyq/psyq_state.h"
 #include "runtime/cdrom/virtual_fs.h"
 #include "runtime/cpu_context.h"
 #include "runtime/memory.h"
@@ -14,6 +15,9 @@ protected:
   void SetUp() override {
     // Set up execution context
     ctx.mem = &mem;
+    // A yield point only dispatches when the guest has a usable stack, so
+    // give the fixture one -- the top of main RAM, where PS1 stacks live.
+    ctx.r29 = 0x801FFFF0;
 
     fs = std::make_unique<VirtualFs>();
     bios = std::make_unique<Bios>(ctx, *fs, mem);
@@ -114,4 +118,85 @@ TEST_F(BiosTest, MemsetFillsBytes) {
   EXPECT_EQ(mem.read8(0x80000001), 0x55);
   EXPECT_EQ(mem.read8(0x80000002), 0x55);
   EXPECT_EQ(mem.read8(0x80000003), 0x55);
+}
+
+// Re-entrant drain
+//
+// A dispatched callback is recompiled game code, and the recompiler injects a
+// drain at every backward branch -- so a callback with a loop in it calls back
+// into drainPendingCallbacks and gets dispatched again. Measured in Crash
+// Bandicoot as 561 million nested calls against 153 thousand real yield points,
+// with the game thread never returning to its main loop.
+//
+// Here the dispatch hook stands in for that callback: it bumps the VSync
+// counter (so the interrupt tick would re-queue) and re-enters the drain.
+// Without the guard this recurses until the stack gives out.
+extern void (*g_testRecompDispatchHook)(recomp_context *ctx, uint32_t addr);
+
+namespace {
+Bios *g_reentryBios = nullptr;
+int g_reentryDispatches = 0;
+
+void reentrantHook(recomp_context * /*ctx*/, uint32_t /*addr*/) {
+  if (++g_reentryDispatches > 50)
+    return; // runaway guard for the failing case
+  ps1::psyq::psyq_state().vsyncCounter.fetch_add(1, std::memory_order_release);
+  g_reentryBios->drainPendingCallbacks();
+}
+} // namespace
+
+TEST_F(BiosTest, DrainPendingCallbacksRefusesToReenter) {
+  auto &st = ps1::psyq::psyq_state();
+  st.reset();
+  st.intrCallback[4] = 0x80046000;
+  st.vsyncCounter.store(1, std::memory_order_release);
+
+  g_reentryBios = bios.get();
+  g_reentryDispatches = 0;
+  g_testRecompDispatchHook = &reentrantHook;
+
+  bios->drainPendingCallbacks();
+
+  g_testRecompDispatchHook = nullptr;
+  g_reentryBios = nullptr;
+
+  EXPECT_EQ(g_reentryDispatches, 1)
+      << "nested drain dispatched the callback again";
+  st.reset();
+}
+
+// Hand-written PS1 assembly may save the register file to a context block and
+// then use $sp as a general-purpose register -- Crash's model transform parks
+// $sp in the scratchpad and packs GTE operands through it.  A yield point
+// reached in that window must not dispatch, or the callback's prologue writes
+// its frame over a data value.  The work stays queued for the next yield
+// point that does have a stack.
+TEST_F(BiosTest, DrainDefersWhileGuestHasNoStack) {
+  auto &st = ps1::psyq::psyq_state();
+  st.reset();
+  st.intrCallback[4] = 0x80046000;
+  st.vsyncCounter.store(1, std::memory_order_release);
+
+  g_reentryBios = bios.get();
+  g_reentryDispatches = 0;
+  g_testRecompDispatchHook = &reentrantHook;
+
+  const uint32_t savedSp = ctx.r29;
+  ctx.r29 = 0x0905A8E4; // a GTE operand, not an address
+  bios->drainPendingCallbacks();
+  EXPECT_EQ(g_reentryDispatches, 0) << "dispatched without a guest stack";
+
+  ctx.r29 = 0x1F8000E0; // scratchpad: live working storage, not a stack
+  bios->drainPendingCallbacks();
+  EXPECT_EQ(g_reentryDispatches, 0) << "dispatched onto the scratchpad";
+
+  // Restoring the stack releases the deferred callback.
+  ctx.r29 = savedSp;
+  bios->drainPendingCallbacks();
+  EXPECT_EQ(g_reentryDispatches, 1) << "deferred callback was never delivered";
+
+  g_testRecompDispatchHook = nullptr;
+  g_reentryBios = nullptr;
+  ctx.r29 = savedSp;
+  st.reset();
 }

@@ -48,35 +48,60 @@ public:
   static constexpr uint32_t NUM_BLOCKS = 15;        // 15 usable blocks
   static constexpr uint32_t SECTOR_SIZE = 128;      // 128 bytes per sector
 
+  static constexpr uint32_t NUM_SECTORS = CARD_SIZE / SECTOR_SIZE; // 1024
+
   MemoryCard();
 
+  /// Wipe and lay down a valid directory, as a freshly formatted card.
   void reset();
+
+  /// Back the card with `path`.  An existing file is loaded; a missing one is
+  /// created from the formatted card.  Later writes are flushed there.
+  bool attachFile(const std::string &path);
+
   bool loadFromFile(const std::string &path);
   bool saveToFile(const std::string &path) const;
 
-  // SIO communication
+  /// One byte of an SIO exchange: returns what the card drives back.
   uint8_t transfer(uint8_t dataIn);
+
+  /// True while the card still owes the host more bytes of a command.
+  bool transferActive() const { return cmd_ != Cmd::None; }
+
   bool isPresent() const { return present_; }
   void setPresent(bool p) { present_ = p; }
 
+  /// Test seam: the raw 128 KB image.
+  const std::array<uint8_t, CARD_SIZE> &image() const { return data_; }
+  std::array<uint8_t, CARD_SIZE> &image() { return data_; }
+
+  uint8_t flagByte() const { return flag_; }
+
 private:
-  std::array<uint8_t, CARD_SIZE> data_;
+  // The card answers a fixed script per command, so the state is just "which
+  // command" plus "how many bytes into it".  See psx-spx,
+  // controllersandmemorycards.md "Memory Card Read/Write Commands".
+  enum class Cmd : uint8_t { None, Await, Read, Write, GetId };
+
+  void formatImage();
+  static uint8_t frameChecksum(const uint8_t *frame, std::size_t n);
+  void flush();
+
+  std::array<uint8_t, CARD_SIZE> data_{};
   bool present_ = true;
 
-  // SIO state machine
-  enum class McState : uint8_t {
-    Idle,
-    AwaitCommand,
-    AwaitAddrHi,
-    AwaitAddrLo,
-    Reading,
-    Writing,
-    WriteAck
-  };
-  McState state_ = McState::Idle;
+  Cmd cmd_ = Cmd::None;
+  uint32_t step_ = 0;     // bytes exchanged since the command byte
+  uint8_t lastIn_ = 0;    // the "(pre)" reply: echo of the previous byte
   uint16_t sectorAddr_ = 0;
-  uint32_t byteCounter_ = 0;
-  uint8_t checksum_ = 0;
+  uint8_t checksum_ = 0;  // running MSB^LSB^data
+  uint8_t writeBuf_[SECTOR_SIZE]{};
+  // Bit3 means "directory not read since insertion".  Games clear it with a
+  // dummy write, and use it to sense a swapped card.
+  uint8_t flag_ = 0x08;
+
+  std::string backingPath_;
+  bool dirty_ = false;
 };
 
 // Input Controller

@@ -40,6 +40,9 @@ protected:
   void SetUp() override {
     ctx.reset();
     ctx.mem = &mem;
+    // A yield point only dispatches when the guest has a usable stack, so
+    // give the fixture one -- the top of main RAM, where PS1 stacks live.
+    ctx.r29 = 0x801FFFF0;
     bios = std::make_unique<bios::Bios>(ctx, fs, mem);
     bios->setCdromController(&cdrom);
     ctx.bios = bios.get();

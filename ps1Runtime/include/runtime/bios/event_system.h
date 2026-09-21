@@ -49,11 +49,22 @@ public:
   // MUST be called from the game thread (uses ctx_ safely).
   void drainPendingCallbacks();
 
+  // Lock-free "is there anything to dispatch?" probe.
+  //
+  // `drainPendingCallbacks` is called from every backward branch of every
+  // recompiled function, and taking `cbMtx_` there costs more than the loop
+  // body it guards.  Callers use this to skip the lock when the queue is
+  // empty, which is the overwhelmingly common case.
+  bool hasPendingCallbacks() const {
+    return pendingCount_.load(std::memory_order_relaxed) != 0;
+  }
+
   // Queue a callback with no specific register setup.
   // Thread-safe: may be called from the main loop thread.
   void queueCallback(uint32_t handlerPc) {
     std::lock_guard<std::mutex> lk(cbMtx_);
     pendingCallbacks_.push_back({handlerPc, 0, 0, false, false});
+    pendingCount_.store(pendingCallbacks_.size(), std::memory_order_release);
   }
 
   // Queue a callback with a0 ($r4) set to a specific value.
@@ -61,6 +72,7 @@ public:
   void queueCallbackWithArg(uint32_t handlerPc, uint32_t a0Val) {
     std::lock_guard<std::mutex> lk(cbMtx_);
     pendingCallbacks_.push_back({handlerPc, a0Val, 0, true, false});
+    pendingCount_.store(pendingCallbacks_.size(), std::memory_order_release);
   }
 
   // Queue a callback with both a0 ($r4) and a1 ($r5) set.
@@ -68,7 +80,19 @@ public:
   void queueCallbackWithArgs(uint32_t handlerPc, uint32_t a0Val, uint32_t a1Val) {
     std::lock_guard<std::mutex> lk(cbMtx_);
     pendingCallbacks_.push_back({handlerPc, a0Val, a1Val, true, true});
+    pendingCount_.store(pendingCallbacks_.size(), std::memory_order_release);
   }
+
+  // Per-handler dispatch accounting (diagnostic).  Written on the game
+  // thread, read from the reporting thread; relaxed atomics keep the read
+  // race-free without costing the writer a lock.
+  struct CallbackStat {
+    std::atomic<uint32_t> pc{0};
+    std::atomic<uint64_t> calls{0};
+    std::atomic<uint64_t> nanos{0};
+  };
+  static constexpr std::size_t kMaxCallbackStats = 12;
+  const CallbackStat *callbackStats() const { return cbStats_; }
 
 private:
   recomp_context &ctx_;
@@ -86,6 +110,14 @@ private:
 
   std::mutex cbMtx_;  // protects pendingCallbacks_
   std::vector<PendingCallback> pendingCallbacks_;
+
+  // Mirror of `pendingCallbacks_.size()`, readable without the mutex.
+  // Only ever written while `cbMtx_` is held, so it cannot disagree with
+  // the vector; a stale read costs at most one extra drain.
+  std::atomic<std::size_t> pendingCount_{0};
+
+  CallbackStat cbStats_[kMaxCallbackStats];
+  void recordDispatch(uint32_t pc, uint64_t nanos);
 
   static constexpr uint32_t MAX_EVENTS = 32;
   static constexpr uint32_t INVALID_EVENT_ID = 0xFFFFFFFF;

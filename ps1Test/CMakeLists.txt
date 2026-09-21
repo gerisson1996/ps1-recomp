@@ -39,6 +39,7 @@ add_executable(ps1Recomp_tests
     recompiler/test_hle_emission.cpp
     recompiler/test_dispatch_emitter.cpp
     recompiler/test_forward_branch.cpp
+    recompiler/test_jump_analysis.cpp
 )
 
 target_link_libraries(ps1Recomp_tests

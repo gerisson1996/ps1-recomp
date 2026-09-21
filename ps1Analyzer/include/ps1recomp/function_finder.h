@@ -24,11 +24,16 @@ constexpr uint32_t OP_BEQ = 0x04;
 constexpr uint32_t OP_BNE = 0x05;
 constexpr uint32_t OP_BLEZ = 0x06;
 constexpr uint32_t OP_BGTZ = 0x07;
+constexpr uint32_t OP_ADDI = 0x08;
 constexpr uint32_t OP_ADDIU = 0x09;
+constexpr uint32_t OP_LUI = 0x0F;
 
 // SPECIAL function codes (bits 5-0)
+constexpr uint32_t FUNC_SLL = 0x00;
 constexpr uint32_t FUNC_JR = 0x08;
 constexpr uint32_t FUNC_JALR = 0x09;
+constexpr uint32_t FUNC_ADDU = 0x21;
+constexpr uint32_t FUNC_SUBU = 0x23;
 
 // Register numbers
 constexpr uint32_t REG_SP = 29;
@@ -39,6 +44,7 @@ inline uint32_t getOpcode(uint32_t instr) { return (instr >> 26) & 0x3F; }
 inline uint32_t getRs(uint32_t instr) { return (instr >> 21) & 0x1F; }
 inline uint32_t getRt(uint32_t instr) { return (instr >> 16) & 0x1F; }
 inline uint32_t getRd(uint32_t instr) { return (instr >> 11) & 0x1F; }
+inline uint32_t getShamt(uint32_t instr) { return (instr >> 6) & 0x1F; }
 inline uint32_t getFunction(uint32_t instr) { return instr & 0x3F; }
 inline int16_t getImm16(uint32_t instr) {
   return static_cast<int16_t>(instr & 0xFFFF);
@@ -92,6 +98,14 @@ inline bool isBranch(uint32_t instr) {
          op == OP_REGIMM;
 }
 
+/// Does `instr` carry a branch delay slot? True for every control transfer:
+/// the word that follows one is never a function entry point, it is that
+/// instruction's delay slot.
+inline bool hasDelaySlot(uint32_t instr) {
+  return isBranch(instr) || isJ(instr) || isJAL(instr) || isJR(instr) ||
+         (getOpcode(instr) == OP_SPECIAL && getFunction(instr) == FUNC_JALR);
+}
+
 /// Compute a PC-relative branch target: PC + 4 + (signed imm16 << 2)
 inline uint32_t branchTarget(uint32_t pc, uint32_t instr) {
   return pc + 4 + (static_cast<uint32_t>(static_cast<int32_t>(getImm16(instr)))
@@ -107,6 +121,18 @@ inline bool isLoad(uint32_t instr) {
 /// Does `instr` write general-purpose register `reg`?
 /// Conservative: covers R-type rd writes, loads, and the immediate ALU forms.
 bool writesRegister(uint32_t instr, uint32_t reg);
+
+/// Is `instr` an encoding the R3000A actually implements?
+///
+/// A whitelist, not a decoder. Every heuristic that walks over unclaimed bytes
+/// has to answer "is this code at all?", and the only cheap answer that does
+/// not fabricate functions out of data is: every word in the candidate has to
+/// be a real instruction. One reserved encoding invalidates the whole slice.
+///
+/// Deliberately excludes COP1 (the PS1 has no FPU), COP3, the MIPS-II/III
+/// opcodes the R3000A never had, and the reserved SPECIAL function codes --
+/// those are the encodings data most often lands on.
+bool isKnownInstruction(uint32_t instr);
 
 } // namespace mips
 
@@ -134,15 +160,33 @@ bool writesRegister(uint32_t instr, uint32_t reg);
 uint32_t refineFunctionEnd(const std::vector<uint32_t> &words,
                            uint32_t startAddr, uint32_t maxEndAddr);
 
-
+/// Could the slice starting at `words[0]` be a function body?
+///
+/// The gate in front of the linear sweep, and the reason the sweep does not
+/// turn data into functions. Two conditions, both required:
+///
+///  - every word up to the terminator is a known instruction. Data that
+///    happens to decode as something plausible almost always hits a reserved
+///    encoding within a few words;
+///  - a legitimate terminator appears *before* `maxEndAddr`. A slice that runs
+///    into the next known entry point without ever returning is not a
+///    function -- it is the middle of something, or it is not code.
+///
+/// @param words       Instruction words, starting at `startAddr`.
+/// @param startAddr   Virtual address of `words[0]`.
+/// @param maxEndAddr  The next known entry point, or the end of the section.
+bool validatesAsFunction(const std::vector<uint32_t> &words, uint32_t startAddr,
+                         uint32_t maxEndAddr);
 
 // Function Detection Source
 
 enum class FunctionSource {
-  EntryPoint, // ELF entry point
-  Symbol,     // From ELF symbol table (STT_FUNC)
-  JALTarget,  // Target of a JAL instruction
-  Prologue,   // Detected by ADDIU $sp, $sp, -N pattern
+  EntryPoint,  // ELF entry point
+  Symbol,      // From ELF symbol table (STT_FUNC)
+  JALTarget,   // Target of a JAL instruction
+  Prologue,    // Detected by ADDIU $sp, $sp, -N pattern
+  JumpArray,   // Slot of a computed jump into an array of fixed-size bodies
+  LinearSweep, // Validated slice of text no other pass claimed
 };
 
 // FunctionInfo
@@ -207,18 +251,33 @@ public:
   void recomputeBoundaries(const ElfParser &elf);
 
 private:
+  /// A computed-jump array whose slots do not return: bodies of a switch that
+  /// only bounce back into the function they belong to.
+  struct JumpIsland {
+    uint32_t base;
+    uint32_t end;
+    uint32_t slot;
+  };
+
   std::vector<FunctionInfo> m_functions;
   std::set<uint32_t> m_jalTargets;
+  std::vector<JumpIsland> m_jumpIslands;
 
   // Detection passes
   void addEntryPoint(const ElfParser &elf);
   void addSymbolFunctions(const ElfParser &elf);
   void scanJALTargets(const Section &text);
   void scanPrologues(const Section &text);
+  void scanJumpArrays(const Section &text);
+  void linearSweep(const Section &text);
   void computeBoundaries(const Section &text);
 
   // Helpers
   bool hasFunction(uint32_t addr) const;
+
+  /// Does `addr` (holding `word`) sit on a jump-island array the jump-array
+  /// pass traced and refused? Those slots are not function entry points.
+  bool isJumpIslandSlot(uint32_t addr, uint32_t word) const;
 
   /// Read a 32-bit little-endian instruction from section data.
   static uint32_t readInstruction(const Section &sec, uint32_t offset);

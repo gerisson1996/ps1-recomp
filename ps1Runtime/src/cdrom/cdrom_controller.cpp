@@ -35,6 +35,7 @@ uint8_t CdromController::fromBcd(uint8_t bcd) {
 CdromController::CdromController() { reset(); }
 
 void CdromController::reset() {
+  std::lock_guard<std::recursive_mutex> lk(mtx_);
   state_ = CdromState::Idle;
   indexReg_ = 0;
   paramFifo_.clear();
@@ -62,11 +63,15 @@ void CdromController::reset() {
   commandPending_ = false;
 }
 
-void CdromController::attachVirtualFs(VirtualFs *vfs) { vfs_ = vfs; }
+void CdromController::attachVirtualFs(VirtualFs *vfs) {
+  std::lock_guard<std::recursive_mutex> lk(mtx_);
+  vfs_ = vfs;
+}
 
 // Status Byte
 
 void CdromController::fireSecondaryNow() {
+  std::lock_guard<std::recursive_mutex> lk(mtx_);
   if (!hasSecondaryResponse_)
     return;
   hasSecondaryResponse_ = false;
@@ -97,6 +102,7 @@ uint8_t CdromController::buildStatusByte() const {
 // Register I/O
 
 void CdromController::writeRegister(uint32_t addr, uint8_t val) {
+  std::lock_guard<std::recursive_mutex> lk(mtx_);
   uint32_t port = addr & 3;
 
   CDROM_LOG("[CDROM-IO] Write port{}.idx{} = 0x{:02X}\n", port, indexReg_, val);
@@ -184,6 +190,7 @@ void CdromController::writeRegister(uint32_t addr, uint8_t val) {
 }
 
 uint8_t CdromController::readRegister(uint32_t addr) {
+  std::lock_guard<std::recursive_mutex> lk(mtx_);
   uint32_t port = addr & 3;
 
   if (port == 0) {
@@ -229,16 +236,36 @@ uint8_t CdromController::readRegister(uint32_t addr) {
 // Interrupt
 
 void CdromController::ackInterrupt(uint8_t val) {
+  std::lock_guard<std::recursive_mutex> lk(mtx_);
   interruptFlag_ &= ~(val & 0x1F);
   // NOTE: no longer clears waitingForAck_ here.
   // Use clearWaitingForAck() explicitly after the data callback has run.
 }
 
-void CdromController::clearWaitingForAck() { waitingForAck_ = false; }
+void CdromController::clearWaitingForAck() {
+  std::lock_guard<std::recursive_mutex> lk(mtx_);
+  waitingForAck_ = false;
+}
 
 // Tick
 
+// Raw sector layout (2352 bytes): 12 sync + 4 header + 8 subheader + data.
+// A 2048-byte read wants the user data at +24; a 2340-byte read keeps the
+// subheader and starts at +12.
+uint32_t CdromController::takeSectorPayload(uint8_t *dst, uint32_t maxBytes) {
+  std::lock_guard<std::recursive_mutex> lk(mtx_);
+  if (!sectorReady_ || dst == nullptr || maxBytes == 0)
+    return 0;
+  const uint32_t dataOff = (sectorSize_ == 2048) ? 24u : 12u;
+  const uint32_t avail = SECTOR_SIZE_RAW - dataOff;
+  const uint32_t n = std::min(maxBytes, avail);
+  std::memcpy(dst, sectorBuffer_.data() + dataOff, n);
+  sectorReady_ = false;
+  return n;
+}
+
 void CdromController::tick(uint32_t cycles) {
+  std::lock_guard<std::recursive_mutex> lk(mtx_);
   // Process pending command after delay
   if (commandPending_ && cyclesUntilResponse_ > 0) {
     if (cycles >= cyclesUntilResponse_) {

@@ -4,6 +4,7 @@
 #include "ps1recomp/config_generator.h"
 #include "ps1recomp/elf_parser.h"
 #include "ps1recomp/function_finder.h"
+#include "ps1recomp/psyq_hle_allowlist.h"
 #include "ps1recomp/psyq_signatures.h"
 
 #include <fstream>
@@ -16,6 +17,22 @@ namespace ps1recomp {
 
 static std::string hexAddr(uint32_t addr) {
     return fmt::format("0x{:08X}", addr);
+}
+
+/// Will the runtime do anything with this match, or is it only a name?
+///
+/// Recognising a PsyQ routine buys nothing on its own. A match is only worth
+/// taking the function away from the recompiler when something downstream
+/// answers for it: the hash-based pass hands the name to the PsyQ registry, so
+/// it has to be registered there; the older name/prefix passes carry no
+/// library and are served by the `[[stubs]]` path instead.
+///
+/// An unhandled match stays an ordinary function -- listed in `[[functions]]`
+/// and translated from the game's own MIPS. Dropping it from both places is
+/// how it used to vanish from the build entirely.
+static bool matchIsHandled(const PsyQMatch& m) {
+    if (m.library.empty()) return true; // legacy [[stubs]] path
+    return psyqHleIsImplemented(fmt::format("{}_{}", m.library, m.name));
 }
 
 // Build TOML Tree
@@ -64,10 +81,11 @@ static toml::value buildConfig(const ElfParser& elf,
     {
         toml::array funcs;
         for (const auto& fi : finder.getFunctions()) {
-            // Skip PsyQ functions (they go into stubs/skips/passthroughs)
+            // Skip PsyQ functions the runtime takes over (they go into
+            // stubs/skips/passthroughs/hle_functions instead)
             bool isPsyQ = false;
             for (const auto& m : matcher.getMatches()) {
-                if (m.address == fi.address) {
+                if (m.address == fi.address && matchIsHandled(m)) {
                     isPsyQ = true;
                     break;
                 }
@@ -87,6 +105,8 @@ static toml::value buildConfig(const ElfParser& elf,
                 case FunctionSource::EntryPoint: f["source"] = "entry_point"; break;
                 case FunctionSource::JALTarget:  f["source"] = "jal_target"; break;
                 case FunctionSource::Prologue:   f["source"] = "prologue"; break;
+                case FunctionSource::JumpArray:  f["source"] = "jump_array"; break;
+                case FunctionSource::LinearSweep: f["source"] = "linear_sweep"; break;
                 default:                         f["source"] = "heuristic"; break;
             }
 
@@ -101,6 +121,7 @@ static toml::value buildConfig(const ElfParser& elf,
     {
         toml::array stubs;
         for (const auto* m : matcher.getStubs()) {
+            if (!matchIsHandled(*m)) continue;
             toml::table s;
             s["name"]      = m->name;
             s["address"]   = hexAddr(m->address);
@@ -115,6 +136,7 @@ static toml::value buildConfig(const ElfParser& elf,
     {
         toml::array skips;
         for (const auto* m : matcher.getSkips()) {
+            if (!matchIsHandled(*m)) continue;
             toml::table s;
             s["name"]    = m->name;
             s["address"] = hexAddr(m->address);
@@ -128,6 +150,7 @@ static toml::value buildConfig(const ElfParser& elf,
     {
         toml::array pass;
         for (const auto* m : matcher.getPassthroughs()) {
+            if (!matchIsHandled(*m)) continue;
             toml::table p;
             p["name"]    = m->name;
             p["address"] = hexAddr(m->address);
@@ -142,14 +165,22 @@ static toml::value buildConfig(const ElfParser& elf,
     // `<library>_<basename>` identifier the recompiler will use to look up
     // the C++ HLE stub. Only emitted when the `library` field is filled
     // (i.e., the match came from the hash-based pass).
+    //
+    // `hle` only goes true for names the runtime registry actually answers
+    // for. Recognising a PsyQ routine is not the same as having an HLE body
+    // for it: marking one true without the body makes ps1Recomp emit a
+    // `psyq_dispatch` the registry aborts on the first time it is called. The
+    // rest stay in the config as identification and get recompiled from the
+    // game's own MIPS, which is always a correct answer.
     {
         toml::array hle;
         for (const auto& m : matcher.getMatches()) {
             if (m.library.empty()) continue;
+            const std::string name = fmt::format("{}_{}", m.library, m.name);
             toml::table f;
             f["address"]   = hexAddr(m.address);
-            f["hle"]       = true;
-            f["name"]      = fmt::format("{}_{}", m.library, m.name);
+            f["hle"]       = psyqHleIsImplemented(name);
+            f["name"]      = name;
             f["library"]   = m.library;
             f["subsystem"] = PsyQMatcher::subsystemName(m.subsystem);
             f["stub_type"] = PsyQMatcher::stubTypeName(m.stubType);

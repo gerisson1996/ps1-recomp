@@ -1,3 +1,4 @@
+#include <fmt/format.h>
 #include "runtime/psyq/psyq_pad.h"
 #include "runtime/bios/bios.h"
 #include "runtime/input/input.h"
@@ -120,9 +121,15 @@ void hle_libetc_PadGetState(recomp_context *ctx) {
 }
 
 //  PadRead(n) -- packed 32-bit pad word: port 1 in the low half, port 2 in
-//  the high half.  Each half is the PsyQ active-low button mask (bit clear
-//  = pressed) which is exactly what `InputController::buttonState()`
-//  already returns; no extra inversion needed.
+//  the high half.  Each half stays active-low (bit clear = pressed), but the
+//  two bytes within a half are swapped relative to `InputController`'s
+//  layout: the pad reports its halfword big-endian on the wire, and libetc
+//  hands that through untouched.  Games therefore see SELECT..LEFT in the
+//  HIGH byte and L2..SQUARE in the LOW byte.
+//
+//  Without the swap every button lands 8 bits away from where the game looks
+//  -- pressing START (bit 3) reads as R1 (bit 11) -- so input silently does
+//  the wrong thing instead of nothing.
 //
 //  Whether the module is "active" doesn't gate reading on real libetc --
 //  PadRead just samples the most recent VBlank snapshot -- so we ignore
@@ -130,15 +137,33 @@ void hle_libetc_PadGetState(recomp_context *ctx) {
 void hle_libetc_PadRead(recomp_context *ctx) {
   auto *input = inputOf(ctx);
 
-  uint16_t port1 = input ? input->buttonState(0) : 0xFFFF;
-  uint16_t port2 = input ? input->buttonState(1) : 0xFFFF;
+  auto byteSwap = [](uint16_t v) -> uint16_t {
+    return static_cast<uint16_t>((v >> 8) | (v << 8));
+  };
+
+  uint16_t port1 = byteSwap(input ? input->buttonState(0) : 0xFFFF);
+  uint16_t port2 = byteSwap(input ? input->buttonState(1) : 0xFFFF);
 
   // Refresh direct-mode buffers as a side-effect -- see PadInitDirect.
   writePadBuffer(ctx, input, g_state.buf1Addr, 0);
   writePadBuffer(ctx, input, g_state.buf2Addr, 1);
 
-  ctx->r[V0] = (static_cast<uint32_t>(port2) << 16) |
-               static_cast<uint32_t>(port1);
+  // PadRead returns the COMPLEMENT of the buffer, so a set bit means pressed:
+  //
+  //     u_long PadRead(int id) { PAD_dr(id); return ~pad_buf; }
+  //
+  // (PsyQ libetc, per the psyz decompilation's src/libetc/pad.c.)  The
+  // buffer itself stays active-low; only this entry point flips it, which is
+  // why PADLup/PADstart and friends are written as `if (pad & PADLup)`.
+  //
+  // Handing back the active-low word instead made every direction read as
+  // held: Crash's PAD_Update filters opposite directions with
+  // `if (pad & UP) pad &= ~DOWN`, which on an un-inverted word collapses to
+  // the same value whether or not anything is pressed -- so no press edge
+  // ever appeared, the menu cursor never moved, and the map camera spun as
+  // though a direction were stuck down.
+  ctx->r[V0] = ~((static_cast<uint32_t>(port2) << 16) |
+                 static_cast<uint32_t>(port1));
 }
 
 // Test-only state hooks

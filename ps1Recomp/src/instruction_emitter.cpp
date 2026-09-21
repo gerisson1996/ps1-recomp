@@ -2,6 +2,7 @@
 // Translates decoded MIPS I instructions to C++ code using runtime macros
 
 #include "ps1recomp/instruction_emitter.h"
+#include "ps1recomp/jump_analysis.h"
 #include <fmt/format.h>
 #include <set>
 
@@ -60,39 +61,7 @@ static std::string u32(const std::string &val) {
 // that the preceding branch/jump reads for its condition/target.
 
 static int getDestGPR(const Instruction &inst) {
-  if (inst.isNOP() || !inst.isValid())
-    return -1;
-
-  switch (inst.category) {
-  case InstrCategory::ALU:
-    // R-type (ADD..SLTU, SLL..SRAV) writes rd; I-type writes rt
-    if (inst.id <= InstrId::SLTU ||
-        (inst.id >= InstrId::SLL && inst.id <= InstrId::SRAV))
-      return inst.rd;
-    return inst.rt;
-  case InstrCategory::Memory:
-    return inst.isLoad() ? static_cast<int>(inst.rt) : -1;
-  case InstrCategory::MulDiv:
-    if (inst.id == InstrId::MFHI || inst.id == InstrId::MFLO)
-      return inst.rd;
-    return -1; // MULT, DIV etc. write HI/LO, not GPR
-  case InstrCategory::COP0:
-    if (inst.id == InstrId::MFC0)
-      return inst.rt;
-    return -1;
-  case InstrCategory::GTE:
-    if (inst.id == InstrId::MFC2 || inst.id == InstrId::CFC2)
-      return inst.rt;
-    return -1;
-  case InstrCategory::Jump:
-    if (inst.id == InstrId::JAL)
-      return 31;
-    if (inst.id == InstrId::JALR)
-      return inst.rd;
-    return -1;
-  default:
-    return -1;
-  }
+  return MipsDecoder::destGPR(inst);
 }
 
 // Replace all occurrences of `from` with `to` in `str`, but only when the
@@ -259,15 +228,18 @@ std::string InstructionEmitter::emitLoad(const Instruction &inst) const {
   auto offset = inst.imm16;
 
   switch (inst.id) {
+  // `read8`/`read16` return unsigned, so the cast is what carries the sign:
+  // without it LB/LH zero-extend and every negative byte or halfword in the
+  // game comes back as a large positive number.
   case InstrId::LB:
-    return assignReg(inst.rt,
-                     fmt::format("MEM_READ8(ctx, {} + {})", s32(base), offset));
+    return assignReg(inst.rt, fmt::format("(int8_t)MEM_READ8(ctx, {} + {})",
+                                          s32(base), offset));
   case InstrId::LBU:
     return assignReg(inst.rt, fmt::format("(uint8_t)MEM_READ8(ctx, {} + {})",
                                           s32(base), offset));
   case InstrId::LH:
-    return assignReg(
-        inst.rt, fmt::format("MEM_READ16(ctx, {} + {})", s32(base), offset));
+    return assignReg(inst.rt, fmt::format("(int16_t)MEM_READ16(ctx, {} + {})",
+                                          s32(base), offset));
   case InstrId::LHU:
     return assignReg(inst.rt, fmt::format("(uint16_t)MEM_READ16(ctx, {} + {})",
                                           s32(base), offset));
@@ -363,10 +335,10 @@ std::string InstructionEmitter::emitJump(const Instruction &inst,
     if (inst.rs == 31) {
       return "return;";
     }
-    return fmt::format("JUMP_INDIRECT(ctx, {});", reg(inst.rs));
+    return fmt::format("JUMP_INDIRECT_AT(ctx, {}, 0x{:08X}u);", reg(inst.rs), pc);
   case InstrId::JALR:
-    return fmt::format("ctx->r{} = 0x{:08X}; CALL_INDIRECT(ctx, {});", inst.rd,
-                       pc + 8, reg(inst.rs));
+    return fmt::format("ctx->r{} = 0x{:08X}; CALL_INDIRECT_AT(ctx, {}, 0x{:08X}u);",
+                       inst.rd, pc + 8, reg(inst.rs), pc);
   default:
     return fmt::format("// UNKNOWN JUMP: {}", MipsDecoder::instrName(inst.id));
   }
@@ -571,6 +543,32 @@ std::string InstructionEmitter::emitFunction(const RecompFunction &func) const {
     }
   }
 
+  // A function that points $ra back into itself resumes there when the block
+  // it jumped into runs its `jr $ra`. Those addresses need labels too -- they
+  // are reached from the dispatch below, not from any branch.
+  const std::vector<uint32_t> raResume =
+      detectInternalReturnTargets(func.instructions, func.address);
+  for (uint32_t target : raResume) {
+    classifyTarget(target);
+  }
+
+  // `jr $rx` for such a function must not return with the dispatch: the block
+  // it entered ends in `jr $ra`, which is a resume, not a return. Returning
+  // anyway unwinds past this function's epilogue, so whatever it stashed on
+  // entry -- $sp included -- is never restored.
+  auto indirectJump = [&](uint8_t rs, uint32_t site) {
+    if (raResume.empty())
+      return fmt::format("JUMP_INDIRECT_AT(ctx, {}, 0x{:08X}u);", reg(rs), site);
+    std::string code =
+        fmt::format("JUMP_INDIRECT_RESUME_AT(ctx, {}, 0x{:08X}u);\n", reg(rs), site);
+    for (uint32_t target : raResume) {
+      code += fmt::format("    if (ctx->r31 == 0x{:08X}u) goto {};\n", target,
+                          label(target));
+    }
+    code += "    return;";
+    return code;
+  };
+
   // Pass 2: Emit code
   // Track reachability: after JR/JALR + delay slot, treat subsequent
   // words as data comments until the next branch target label.
@@ -608,7 +606,8 @@ std::string InstructionEmitter::emitFunction(const RecompFunction &func) const {
     // If this JR $rx has a detected jump table, replace JUMP_INDIRECT
     // with a static switch/goto over the known target addresses.
     // A JUMP_INDIRECT fallback is kept for safety.
-    if (inst.id == InstrId::JR && inst.rs != 31 && !func.jumpTables.empty()) {
+    if (inst.id == InstrId::JR && inst.rs != 31) {
+      bool tabled = false;
       for (const auto &jt : func.jumpTables) {
         if (jt.jrInstrIdx == i && !jt.targets.empty()) {
           std::string sw;
@@ -619,10 +618,44 @@ std::string InstructionEmitter::emitFunction(const RecompFunction &func) const {
             sw += fmt::format("    if (_sw_target == 0x{:08X}u) goto {};\n",
                               target, label(target));
           }
-          sw += fmt::format("    JUMP_INDIRECT(ctx, {}); // fallback\n", reg(inst.rs));
+          sw += fmt::format("    // fallback\n    {}\n", indirectJump(inst.rs, addr));
           sw += "    }";
           code = sw;
+          tabled = true;
           break;
+        }
+      }
+      if (!tabled) {
+        // No table was recovered -- the index scaling is not visible near the
+        // jump (Crash's 0x80037D50 forms it with an SRL ~130 instructions
+        // back, so the linear pass reads a coefficient of 1 and bails).  The
+        // jump still lands on in-function code, and every branch target in
+        // this function already has a label, so match against those.
+        //
+        // This can only change behaviour for a value that is exactly one of
+        // this function's label addresses.  Such a value is in-function code,
+        // so jumping there is right -- and it is what the indirect dispatch
+        // cannot do, since no *function* starts at an interior address, which
+        // is why it aborts instead.  Anything else (a real function pointer,
+        // a return thunk) matches nothing and still takes the fallback.
+        std::string sw;
+        std::size_t n = 0;
+        for (std::size_t k = 0; k < labelTargets.size(); ++k) {
+          if (!labelTargets[k])
+            continue;
+          const uint32_t target = func.address + static_cast<uint32_t>(k) * 4;
+          sw += fmt::format("    if (_sw_target == 0x{:08X}u) goto {};\n",
+                            target, label(target));
+          ++n;
+        }
+        if (n == 0) {
+          code = indirectJump(inst.rs, addr);
+        } else {
+          code = fmt::format("{{ // in-function labels ({} entries)\n"
+                             "    uint32_t _sw_target = static_cast<uint32_t>({});\n"
+                             "{}"
+                             "    // fallback\n    {}\n    }}",
+                             n, reg(inst.rs), sw, indirectJump(inst.rs, addr));
         }
       }
     }

@@ -1,4 +1,6 @@
 #include "runtime/gpu/gpu.h"
+#include <execinfo.h>
+#include <cstdlib>
 #include "runtime/metrics.h"
 #include <algorithm>
 #include <cstdio>
@@ -99,6 +101,32 @@ uint32_t GPU::readGPUREAD() {
 }
 
 void GPU::writeGP0(uint32_t val) {
+  // `PS1_GP0_TRACE=<hex opcode>` prints a host backtrace on the first few
+  // GP0 commands with that opcode.  Crash writes GP0 directly rather than
+  // through DMA, so the backtrace names the recompiled guest function that
+  // emitted the primitive -- which is how you find the renderer for content
+  // that is missing from the screen without guessing at function roles.
+  {
+    static const int traceOp = []() {
+      const char *e = std::getenv("PS1_GP0_TRACE");
+      return (e && *e) ? (int)std::strtol(e, nullptr, 16) : -1;
+    }();
+    if (traceOp >= 0 && !vramTransfer_.isWritingToVRAM &&
+        !isCommandExecuting_ && (int)(val >> 24) == traceOp) {
+      static int traced = 0;
+      if (traced < 4) {
+        ++traced;
+        fmt::print(stderr, "[GP0-TRACE] #{} op=0x{:02X} val=0x{:08X}\n", traced,
+                   val >> 24, val);
+        void *fr[24];
+        int d = backtrace(fr, 24);
+        char **sy = backtrace_symbols(fr, d);
+        for (int i = 1; i < d && i < 12; ++i)
+          fmt::print(stderr, "[GP0-TRACE]   #{} {}\n", i, sy ? sy[i] : "?");
+        free(sy);
+      }
+    }
+  }
   {
     static int gp0Count = 0;
     static std::unordered_map<uint8_t, int> opcodeHist;
@@ -204,6 +232,7 @@ void GPU::writeGP0(uint32_t val) {
     case 0x3E:
     case 0x3F:
       expectedCommandWords_ = 12;
+      ++censusGt4Start_;
       break; // Gouraud Textured 4-point polygon
     case 0x40:
     case 0x41:
@@ -1015,10 +1044,99 @@ Color16 GPU::applyBlend(Color16 fg, Color16 bg) {
   return c;
 }
 
+void GPU::censusTriangle(const Vertex &v0, const Vertex &v1, const Vertex &v2,
+                         bool degenerate) {
+  if (degenerate) {
+    ++censusDegenerate_;
+    return;
+  }
+  const int minX = std::min({v0.x, v1.x, v2.x});
+  const int minY = std::min({v0.y, v1.y, v2.y});
+  const int maxX = std::max({v0.x, v1.x, v2.x});
+  const int maxY = std::max({v0.y, v1.y, v2.y});
+  if (maxX < drawAreaX1_ || minX > drawAreaX2_ || maxY < drawAreaY1_ ||
+      minY > drawAreaY2_) {
+    ++censusClipped_;
+    // Triangles get their own budget: sprites are far more numerous and would
+    // otherwise exhaust a shared one before a single triangle is logged --
+    // which is exactly how an earlier pass wrongly concluded that no 3D
+    // geometry was being clipped.
+    ++censusClippedTri_;
+    if (++censusClipPrints_ <= 12)
+      fmt::print(stderr,
+                 "[clip-tri] #{} v0=({},{}) v1=({},{}) v2=({},{}) area=({},{})-({},{})\n",
+                 censusClippedTri_, v0.x, v0.y, v1.x, v1.y, v2.x, v2.y,
+                 drawAreaX1_, drawAreaY1_, drawAreaX2_, drawAreaY2_);
+    return;
+  }
+  ++censusDrawn_;
+  ++censusTri_;
+  // Centroid into the grid, in display-relative coordinates.
+  const int cx = ((v0.x + v1.x + v2.x) / 3) - drawAreaX1_;
+  const int cy = ((v0.y + v1.y + v2.y) / 3) - drawAreaY1_;
+  const int gx = cx * kCensusW / 512;
+  const int gy = cy * kCensusH / 240;
+  if (gx >= 0 && gx < kCensusW && gy >= 0 && gy < kCensusH) {
+    ++censusGrid_[gy][gx];
+    ++censusGridTri_[gy][gx];
+  }
+}
+
+void GPU::censusRect(int x, int y, int w, int h) {
+  if (w <= 0 || h <= 0) {
+    ++censusDegenerate_;
+    return;
+  }
+  if (x + w < drawAreaX1_ || x > drawAreaX2_ || y + h < drawAreaY1_ ||
+      y > drawAreaY2_) {
+    ++censusClipped_;
+    return;
+  }
+  ++censusDrawn_;
+  const int gx = (x + w / 2 - drawAreaX1_) * kCensusW / 512;
+  const int gy = (y + h / 2 - drawAreaY1_) * kCensusH / 240;
+  if (gx >= 0 && gx < kCensusW && gy >= 0 && gy < kCensusH)
+    ++censusGrid_[gy][gx];
+}
+
+void GPU::censusReset() {
+  std::memset(censusGrid_, 0, sizeof(censusGrid_));
+  std::memset(censusGridTri_, 0, sizeof(censusGridTri_));
+  censusTri_ = 0;
+  censusGt4Start_ = censusGt4Exec_ = 0;
+  censusClippedTri_ = 0;
+  censusClipPrints_ = 0;
+  censusDrawn_ = censusDegenerate_ = censusClipped_ = 0;
+}
+
+void GPU::censusDump(const char *path) const {
+  FILE *f = std::fopen(path, "w");
+  if (!f)
+    return;
+  std::fprintf(f, "drawn %lu degenerate %lu clipped %lu tri %lu\n",
+               (unsigned long)censusDrawn_, (unsigned long)censusDegenerate_,
+               (unsigned long)censusClipped_, (unsigned long)censusTri_);
+  std::fprintf(f, "gt4_start %lu gt4_exec %lu clipped_tri %lu\n",
+               (unsigned long)censusGt4Start_, (unsigned long)censusGt4Exec_,
+               (unsigned long)censusClippedTri_);
+  for (int y = 0; y < kCensusH; ++y) {
+    for (int x = 0; x < kCensusW; ++x)
+      std::fprintf(f, "%u ", censusGrid_[y][x]);
+    std::fprintf(f, "\n");
+  }
+  for (int y = 0; y < kCensusH; ++y) {
+    for (int x = 0; x < kCensusW; ++x)
+      std::fprintf(f, "%u ", censusGridTri_[y][x]);
+    std::fprintf(f, "\n");
+  }
+  std::fclose(f);
+}
+
 void GPU::rasterizeTriangle(Vertex v0, Vertex v1, Vertex v2, Color16 color,
                             bool blend) {
   // Check winding and swap if necessary so we have CCW
   int area = edgeFunction(v0, v1, v2);
+  censusTriangle(v0, v1, v2, area == 0);
   if (area == 0)
     return; // Degenerate
   if (area < 0) {
@@ -1066,6 +1184,7 @@ void GPU::rasterizeTexturedTriangle(Vertex v0, Vertex v1, Vertex v2,
                                     Color16 color, uint16_t clut,
                                     uint16_t tpage, bool isRaw, bool blend) {
   int area = edgeFunction(v0, v1, v2);
+  censusTriangle(v0, v1, v2, area == 0);
   if (area == 0)
     return;
   if (area < 0) {
@@ -1233,6 +1352,8 @@ void GPU::executeRect() {
     h = 16;
     break;
   }
+
+  censusRect(v.x, v.y, w, h);
 
   // Textured sprites carry a UV base + CLUT in word[2] and sample from the
   // current texture page (GP0 0xE1). Untextured rects use the flat command
@@ -1538,6 +1659,7 @@ void GPU::executeGouraudTexturedPoly3() {
 }
 
 void GPU::executeGouraudTexturedPoly4() {
+  ++censusGt4Exec_;
   // Word layout: c0+cmd, v0, uv0+clut, c1, v1, uv1+tpage, c2, v2, uv2, c3,
   // v3, uv3
   Color24 c[4];
@@ -1584,6 +1706,7 @@ void GPU::executeGouraudTexturedPoly4() {
 void GPU::rasterizeGouraudTriangle(Vertex v0, Vertex v1, Vertex v2, Color24 c0,
                                    Color24 c1, Color24 c2, bool blend) {
   int area = edgeFunction(v0, v1, v2);
+  censusTriangle(v0, v1, v2, area == 0);
   if (area == 0)
     return;
   if (area < 0) {
@@ -1638,6 +1761,7 @@ void GPU::rasterizeGouraudTexturedTriangle(Vertex v0, Vertex v1, Vertex v2,
                                            uint16_t tpage, bool isRaw,
                                            bool blend) {
   int area = edgeFunction(v0, v1, v2);
+  censusTriangle(v0, v1, v2, area == 0);
   if (area == 0)
     return;
   if (area < 0) {

@@ -132,6 +132,11 @@ public:
     uint16_t repeatAddr;  // loop target, in 8-byte units
     bool loopFlag;
     bool endFlag;
+    // Envelope phase. Exposed because key-on and key-off precedence when both
+    // latches are set for the same voice is not observable any other way: no
+    // register reports the phase, and both outcomes can produce near-silent
+    // output for the first few samples.
+    AdsrPhase adsrPhase;
   };
   VoiceDebugState debugVoiceState(uint32_t voiceIdx) const;
 

@@ -76,12 +76,23 @@ std::string emitDispatchBody() {
         return e && e[0] != '\0' && std::strcmp(e, "0") != 0;
     }();
     if (!s_permissive) {
+        // `RA` names the caller only when the guest reached here through JALR.
+        // A direct JAL leaves the previous value in r31, so on those paths it
+        // points somewhere unrelated and has sent more than one investigation
+        // to the wrong function.  The host stack always names the emitted
+        // function that issued the dispatch; resolve it with
+        //   addr2line -f -C -e build/ps1Runtime/ps1Runtime <offset>
         fmt::print(stderr,
-                   "[DISPATCH] FATAL: unmapped call to 0x{:08X} (RA=0x{:08X}, phys=0x{:08X})\n"
+                   "[DISPATCH] FATAL: unmapped call to 0x{:08X} (phys=0x{:08X})\n"
+                   "           issued from guest site 0x{:08X}; RA=0x{:08X}\n"
                    "           This address was never emitted by the recompiler.\n"
+                   "           RA is stale on direct-JAL paths -- trust the site and the stack.\n"
                    "           Set PS1_DISPATCH_PERMISSIVE=1 to log and continue instead.\n",
-                   addr, ctx->r[31], phys);
+                   addr, phys, ps1LastIndirectSite(), ctx->r[31]);
         std::fflush(stderr);
+        void* bt[24];
+        int frames = backtrace(bt, 24);
+        backtrace_symbols_fd(bt, frames, 2);
         std::abort();
     }
     static std::unordered_map<uint32_t, uint32_t> s_unknownHits;

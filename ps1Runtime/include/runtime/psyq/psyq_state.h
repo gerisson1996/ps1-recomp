@@ -161,6 +161,11 @@ public:
   /// Zero disables.
   uint32_t rcntTicksPerVBlank = 0;
 
+  /// Base of libgpu's own environment block, the one `ResetGraph` builds.
+  /// It lives in the game's BSS, so only the game TOML knows where -- the HLE
+  /// cannot derive it. Zero disables the initialisation.
+  uint32_t gpuEnvAddr = 0;
+
   // Test helpers
   /// Reset every field to its default-constructed value.  Tests call
   /// this in `SetUp()` to isolate cases sharing the singleton.

@@ -178,6 +178,31 @@ inline uint32_t indirect_trace_ra_filter() {
     }                                                                          \
   } while (0)
 
+// Guest address of the most recent indirect jump or call site.
+//
+// The dispatcher prints this when a target cannot be resolved.  Neither of the
+// other two clues is enough on its own: the guest `$ra` holds the return
+// address of the last *direct* call, so it points somewhere unrelated on those
+// paths, and the host stack names the emitted function but not which of its
+// several indirect sites fired -- the GOOL interpreter alone has seven.
+inline uint32_t &ps1LastIndirectSite() {
+  static uint32_t site = 0;
+  return site;
+}
+
+#define PS1_SET_INDIRECT_SITE(pc) (ps1LastIndirectSite() = (pc))
+
+#define CALL_INDIRECT_AT(ctx, addr, pc)                                        \
+  do {                                                                         \
+    PS1_SET_INDIRECT_SITE(pc);                                                 \
+    CALL_INDIRECT(ctx, addr);                                                  \
+  } while (0)
+#define JUMP_INDIRECT_AT(ctx, addr, pc)                                        \
+  do {                                                                         \
+    PS1_SET_INDIRECT_SITE(pc);                                                 \
+    JUMP_INDIRECT(ctx, addr);                                                  \
+  } while (0)
+
 #define CALL_INDIRECT(ctx, addr)                                               \
   do {                                                                         \
     PS1_INDIRECT_TRACE_HOOK(ctx, addr);                                        \
@@ -188,5 +213,18 @@ inline uint32_t indirect_trace_ra_filter() {
     PS1_INDIRECT_TRACE_HOOK(ctx, addr);                                        \
     recomp_dispatch(rdram, ctx, static_cast<uint32_t>(addr));                  \
     return;                                                                    \
+  } while (0)
+// Same dispatch, but the emitter tests $ra afterwards: the block being jumped
+// into ends in `jr $ra`, and the calling function has pointed $ra back into
+// itself, so control resumes there instead of unwinding to the caller.
+#define JUMP_INDIRECT_RESUME(ctx, addr)                                        \
+  do {                                                                         \
+    PS1_INDIRECT_TRACE_HOOK(ctx, addr);                                        \
+    recomp_dispatch(rdram, ctx, static_cast<uint32_t>(addr));                  \
+  } while (0)
+#define JUMP_INDIRECT_RESUME_AT(ctx, addr, pc)                                 \
+  do {                                                                         \
+    PS1_SET_INDIRECT_SITE(pc);                                                 \
+    JUMP_INDIRECT_RESUME(ctx, addr);                                           \
   } while (0)
 #define COP0_RFE(ctx) /* NOP for now */

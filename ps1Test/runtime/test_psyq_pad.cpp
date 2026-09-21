@@ -74,45 +74,110 @@ TEST_F(PsyqPadTest, PadStartComStopComReturnZero) {
   EXPECT_EQ(ctx.r[V0], 0u);
 }
 
-// PadRead -- packed (port2 << 16) | port1, active-low
+// PadRead -- packed (port2 << 16) | port1, ACTIVE-HIGH (set bit = pressed)
+//
+// Two different SDK entry points are called "pad read" and they disagree on
+// polarity.  BIOS B(0x16) fills the pad buffer and leaves it active-low; the
+// libetc function this HLE stands in for calls that and returns its
+// complement:
+//
+//     u_long PadRead(int id) { PAD_dr(id); return ~pad_buf; }
+//
+// (psyz decompilation, src/libetc/pad.c.)  Crash relies on the complement:
+// its PAD_Update filters opposite directions with `if (pad & UP) pad &= ~DOWN`
+// on the RETURN value, which is only meaningful when a set bit means pressed.
+// Returning the active-low word instead made idle and Down-held produce the
+// same 0x9FFF, so no press edge ever existed -- the menu cursor would not
+// move and the map camera spun as if a direction were stuck.
 
-TEST_F(PsyqPadTest, PadReadIdleReturnsAllOnes) {
-  // No buttons pressed on either port -> 0xFFFFFFFF.
+TEST_F(PsyqPadTest, PadReadIdleReturnsZero) {
+  // No buttons pressed on either port -> no bits set.
   hle_libetc_PadRead(&ctx);
-  EXPECT_EQ(ctx.r[V0], 0xFFFFFFFFu);
+  EXPECT_EQ(ctx.r[V0], 0u);
 }
 
-TEST_F(PsyqPadTest, PadReadPressedBitsAreCleared) {
-  // Press CROSS on port 0 -> bit 14 cleared in low half.
+// PadRead's halves are active-low but byte-swapped relative to
+// `InputController`'s bit layout, so a pressed button clears exactly the bit
+// named by the PsyQ `PADxxx` constant.  These are the SDK's own values -- a
+// game doing `if (!(pad & PADstart))` only works if we honour them.
+constexpr uint16_t PAD_START = 0x0800;  // BTN_START  (controller bit 3)
+constexpr uint16_t PAD_RDOWN = 0x0040;  // BTN_CROSS  (controller bit 14)
+constexpr uint16_t PAD_RLEFT = 0x0080;  // BTN_SQUARE (controller bit 15)
+constexpr uint16_t PAD_RRIGHT = 0x0020; // BTN_CIRCLE (controller bit 13)
+
+TEST_F(PsyqPadTest, PadReadPressedBitsAreSet) {
+  // Press CROSS on port 0 -> PADRdown set in the low half, nothing else.
   input.press(input::BTN_CROSS, 0);
   hle_libetc_PadRead(&ctx);
-  uint32_t expected = 0xFFFFFFFFu & ~static_cast<uint32_t>(input::BTN_CROSS);
-  EXPECT_EQ(ctx.r[V0], expected);
+  EXPECT_EQ(ctx.r[V0], static_cast<uint32_t>(PAD_RDOWN));
 
-  // Add START on port 1 -> bit 3 of high half cleared.
+  // Add START on port 1 -> PADstart set in the high half.
   input.press(input::BTN_START, 1);
   hle_libetc_PadRead(&ctx);
-  expected = (~static_cast<uint32_t>(input::BTN_CROSS) & 0xFFFFu) |
-             ((~static_cast<uint32_t>(input::BTN_START) & 0xFFFFu) << 16);
+  uint32_t expected = static_cast<uint32_t>(PAD_RDOWN) |
+                      (static_cast<uint32_t>(PAD_START) << 16);
   EXPECT_EQ(ctx.r[V0], expected);
+}
+
+// Ground truth from the working reference (CrashBandicoot-Launcher,
+// `RecompOne.Runtime/Bios/BiosB.cs::PadRead`): it byte-swaps each half
+// (`(s >> 8) | (s << 8)`) before handing the word to the game, keeping the
+// active-low sense.  Measured against our own build: without the swap,
+// pressing START moved controller bit 3, the game read it as R1, and
+// `title_state` never left the title screen; with it, the guest's decoded pad
+// global reads 0x0800 -- PADstart -- and the title advances.
+TEST_F(PsyqPadTest, PadReadUsesPsyqButtonMaskNotControllerBitLayout) {
+  input.press(input::BTN_START, 0);
+  hle_libetc_PadRead(&ctx);
+
+  const uint16_t low = static_cast<uint16_t>(ctx.r[V0] & 0xFFFFu);
+  EXPECT_EQ(low, PAD_START);
+  // The raw controller bit must NOT be what the game sees.
+  EXPECT_NE(static_cast<uint16_t>(~low & 0xFFFFu),
+            static_cast<uint16_t>(input::BTN_START));
+}
+
+// Ground truth verified directly against the Crash Bandicoot (SCUS-94900)
+// retail binary: `PadUpdate` at VA 0x800167A4 loops the port index in $s1 and
+// picks the half with `bnez $s1, 0x80016818` before a delay-slot `srl
+// $v1,$v0,0x10` -- port 0 (s1==0) falls through to `andi $v1,$v0,0xffff`
+// (low half), port 1 (s1!=0) keeps the `srl` result (high half). This
+// matches CRASH_BANDICOOT_RECOMP.md Sec 2.1's account of the reference
+// implementation's "wrong halfword" trap (port 0 must be the low 16 bits),
+// and confirms our packing already has it right -- this test pins that so a
+// future change to hle_libetc_PadRead can't silently swap the halves.
+TEST_F(PsyqPadTest, PadReadPort0IsLowHalfPerRetailPadUpdateDisassembly) {
+  input.press(input::BTN_CROSS, 0);  // port 0 (low half)
+  input.press(input::BTN_SQUARE, 1); // port 1 (high half)
+  hle_libetc_PadRead(&ctx);
+
+  uint16_t lowHalf = static_cast<uint16_t>(ctx.r[V0] & 0xFFFFu);
+  uint16_t highHalf = static_cast<uint16_t>((ctx.r[V0] >> 16) & 0xFFFFu);
+
+  // CROSS (port 0) must land in the low half, not the high half.
+  EXPECT_EQ(lowHalf, PAD_RDOWN);
+  EXPECT_NE(highHalf, PAD_RDOWN);
+
+  // SQUARE (port 1) must land in the high half, not the low half.
+  EXPECT_EQ(highHalf, PAD_RLEFT);
+  EXPECT_NE(lowHalf, PAD_RLEFT);
 }
 
 TEST_F(PsyqPadTest, PadReadReflectsRelease) {
   input.press(input::BTN_CIRCLE, 0);
   hle_libetc_PadRead(&ctx);
-  EXPECT_EQ(ctx.r[V0] & 0xFFFFu,
-            static_cast<uint32_t>(0xFFFFu & ~input::BTN_CIRCLE));
+  EXPECT_EQ(ctx.r[V0] & 0xFFFFu, static_cast<uint32_t>(PAD_RRIGHT));
 
   input.release(input::BTN_CIRCLE, 0);
   hle_libetc_PadRead(&ctx);
-  EXPECT_EQ(ctx.r[V0], 0xFFFFFFFFu);
+  EXPECT_EQ(ctx.r[V0], 0u);
 }
 
 TEST_F(PsyqPadTest, PadReadFallsBackWhenNoBackend) {
   // Detach the input controller -- bios accessor returns nullptr.
   bios->setInputController(nullptr);
   hle_libetc_PadRead(&ctx);
-  EXPECT_EQ(ctx.r[V0], 0xFFFFFFFFu);
+  EXPECT_EQ(ctx.r[V0], 0u); // no backend reads as "nothing pressed"
 }
 
 // PadInitDirect -- 34-byte status buffer refresh
