@@ -228,6 +228,32 @@ void guardSigsegv(int sig, siginfo_t *info, void *ctx) {
   g_guardStepping = 1;
 }
 
+// Presented frames, guest VBlanks and wall time, side by side.
+//
+// The two clocks are separate: the render loop is paced by the compositor and
+// has been measured between 32 and 54 frames per second during play, while the
+// guest advances on its own 60 Hz pump.  Printing both is what turns "the game
+// feels slow" into a number, and tells which of the two is behind.
+std::chrono::steady_clock::time_point g_runStart;
+// Hardware ticks actually issued: CDROM state machine plus the root counters.
+std::atomic<uint64_t> g_hwTicks{0};
+
+void reportClocks(uint64_t renderFrames) {
+  using namespace std::chrono;
+  const double secs =
+      duration_cast<milliseconds>(steady_clock::now() - g_runStart).count() /
+      1000.0;
+  if (secs <= 0.0)
+    return;
+  const uint32_t vsyncs =
+      ps1::psyq::psyq_state().vsyncCounter.load(std::memory_order_acquire);
+  const uint64_t hw = g_hwTicks.load(std::memory_order_relaxed);
+  fmt::print("[clocks] {:.1f}s  render {} ({:.1f}/s)  guest vblank {} ({:.1f}/s)"
+             "  hw tick {} ({:.1f}/s)\n",
+             secs, renderFrames, renderFrames / secs, vsyncs, vsyncs / secs, hw,
+             hw / secs);
+}
+
 // Called at shutdown so a run that caught several writers still reports the
 // full census, not only the ones whose stack fit in the shot budget.
 void dumpWriteGuard() {
@@ -1036,6 +1062,36 @@ int main(int argc, char *argv[]) {
     if (now < next)
       return;
     next = now + microseconds(16667); // ~60 Hz
+
+    // Hardware tick, paced by the wall clock rather than by presentation.
+    g_hwTicks.fetch_add(1, std::memory_order_relaxed);
+    cdromCtrl.tick(CYCLES_PER_FRAME);
+
+    uint32_t timerIrqs = 0;
+    for (uint32_t scanline = 0; scanline < SCANLINES_PER_FRAME; scanline++)
+      timerIrqs |= timers.tick(CYCLES_PER_SCANLINE, true, false);
+    if (timerIrqs & ps1::IRQ_TMR0)
+      irqCtrl.raiseInterrupt(ps1::IRQ_TMR0);
+    if (timerIrqs & ps1::IRQ_TMR1)
+      irqCtrl.raiseInterrupt(ps1::IRQ_TMR1);
+    if (timerIrqs & ps1::IRQ_TMR2)
+      irqCtrl.raiseInterrupt(ps1::IRQ_TMR2);
+    irqCtrl.raiseInterrupt(ps1::IRQ_VBLANK);
+    // The CDROM event is raised by the interrupt callback from pushResponse;
+    // only the hardware line is asserted here.
+    if (cdromCtrl.hasInterrupt())
+      irqCtrl.raiseInterrupt(ps1::IRQ_CDROM);
+    if (dma.hasInterrupt())
+      irqCtrl.raiseInterrupt(ps1::IRQ_DMA);
+    if (input.hasInterrupt()) {
+      irqCtrl.raiseInterrupt(ps1::IRQ_PAD_MC);
+      input.clearInterrupt();
+    }
+    if (spu.hasIrq()) {
+      irqCtrl.raiseInterrupt(ps1::IRQ_SPU);
+      spu.clearIrq();
+    }
+
     {
       uint32_t newCount = ps1::psyq::psyq_state().vsyncCounter.fetch_add(
           1, std::memory_order_release) + 1;
@@ -1240,6 +1296,8 @@ int main(int argc, char *argv[]) {
   // Armed after the ELF loader's bulk copies, so only the running game trips it.
   installWriteGuard(memory.ramPtr());
 
+  g_runStart = std::chrono::steady_clock::now();
+
   // Launch game thread
   std::thread gameThread([&]() {
     // Identify ourselves so Bios::queueCdromEvent can inline-drain when
@@ -1310,49 +1368,15 @@ int main(int argc, char *argv[]) {
       }
     }
 
-    // 2. Tick Hardware (per frame)
-    // CDROM state machine
-    cdromCtrl.tick(CYCLES_PER_FRAME);
+    // The hardware tick used to run here, once per presented frame, which tied
+    // the CDROM and the root counters to the compositor.  Measured during
+    // play: this loop ran between 32 and 54 frames per second while the guest
+    // pump held 59, so the root counters -- the clock Crash reads for
+    // velocity -- lost up to a third of their rate and the game moved in slow
+    // motion, worse the more there was to draw.  It now rides the game
+    // thread's own 60 Hz pump; see vblankTick.
 
-    // Timers (263 scanlines per NTSC frame)
-    uint32_t timerIrqs = 0;
-    for (uint32_t scanline = 0; scanline < SCANLINES_PER_FRAME; scanline++) {
-      timerIrqs |= timers.tick(CYCLES_PER_SCANLINE, true, false);
-    }
-
-    // Timer IRQs
-    if (timerIrqs & ps1::IRQ_TMR0)
-      irqCtrl.raiseInterrupt(ps1::IRQ_TMR0);
-    if (timerIrqs & ps1::IRQ_TMR1)
-      irqCtrl.raiseInterrupt(ps1::IRQ_TMR1);
-    if (timerIrqs & ps1::IRQ_TMR2)
-      irqCtrl.raiseInterrupt(ps1::IRQ_TMR2);
-
-    // VBlank IRQ (once per frame)
-    irqCtrl.raiseInterrupt(ps1::IRQ_VBLANK);
-
-    // VBlank events (triggerVBlankEvent, snapshotDisplayBuffer, updatePadBuffers)
-    // are now fired by the dedicated vblankThread above at a steady 60Hz,
-    // so they run independently of the SDL render loop speed.
-
-    // Other IRQs
-    if (cdromCtrl.hasInterrupt()) {
-      irqCtrl.raiseInterrupt(ps1::IRQ_CDROM);
-      // Event triggering is now handled by the interrupt callback
-      // (fired inline from pushResponse), so we only raise the HW IRQ here.
-    }
-    if (dma.hasInterrupt())
-      irqCtrl.raiseInterrupt(ps1::IRQ_DMA);
-    if (input.hasInterrupt()) {
-      irqCtrl.raiseInterrupt(ps1::IRQ_PAD_MC);
-      input.clearInterrupt();
-    }
-    if (spu.hasIrq()) {
-      irqCtrl.raiseInterrupt(ps1::IRQ_SPU);
-      spu.clearIrq();
-    }
-
-    // 3. Render
+    // 2. Render
     if (!renderer.processEvents()) {
       running = false;
       continue;
@@ -1439,6 +1463,7 @@ int main(int argc, char *argv[]) {
   }
   gpu.publishMetrics();
   ps1::metrics::dumpJson();
+  reportClocks(frameCount);
   dumpWriteGuard();
 
   // Cleanup
@@ -1462,6 +1487,7 @@ int main(int argc, char *argv[]) {
       // memory and SDL/audio handles.
       fmt::print("[Main] Game thread did not finish in 2s -- forcing exit "
                  "(skipping destructors to avoid UAF race)\n");
+      reportClocks(frameCount);
       fmt::print("Simulation ended after {} frames.\n", frameCount);
       // Re-publish: the game thread kept issuing GP0 words during the 2s
       // deadline above.  publishMetrics() only hands over what has accrued
