@@ -85,12 +85,14 @@ public:
     if (phys >= BIOS_BASE && phys < BIOS_BASE + BIOS_SIZE) {
       return bios_[phys - BIOS_BASE];
     }
+#ifndef PS1_SWITCH_GPU_DMA_TEST
     // CD-ROM (byte-addressed reads)
     if (phys >= 0x1F801800 && phys < 0x1F801804) {
       if (cdrom_)
         return cdrom_->readRegister(phys);
       return 0;
     }
+#endif
     // I/O ports -- return 0 for byte reads not explicitly handled
     return 0;
   }
@@ -246,12 +248,14 @@ public:
       return;
     }
 
+#ifndef PS1_SWITCH_GPU_DMA_TEST
     // CD-ROM (byte-addressed)
     if (phys >= 0x1F801800 && phys < 0x1F801804) {
       if (cdrom_)
         cdrom_->writeRegister(phys, val);
       return;
     }
+#endif
 
     // BIOS is ROM -- writes are ignored
     // Other I/O ports -- ignored at byte level
