@@ -50,6 +50,20 @@ TEST_F(CdromControllerTest, InitCommand) {
   EXPECT_TRUE(cdrom.hasInterrupt());
 }
 
+TEST_F(CdromControllerTest, ReadTOCSeparatesAcknowledgeAndComplete) {
+  cdrom.writeRegister(0x1F801800, 0x00);
+  cdrom.writeRegister(0x1F801801, 0x1E); // ReadTOC
+
+  // First response must remain visible until the guest acknowledges it.
+  EXPECT_EQ(cdrom.interruptFlag(), INT_ACKNOWLEDGE);
+
+  // ACK through the real register path (index 1, port 3). This should expose
+  // the queued second response rather than losing it.
+  cdrom.writeRegister(0x1F801800, 0x01);
+  cdrom.writeRegister(0x1F801803, 0x1F);
+  EXPECT_EQ(cdrom.interruptFlag(), INT_COMPLETE);
+}
+
 TEST_F(CdromControllerTest, StatusRegisterReflectsState) {
   // Read status register (port 0)
   uint8_t status = cdrom.readRegister(0x1F801800);
