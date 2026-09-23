@@ -52,8 +52,10 @@ int main(int argc, char **argv) {
     const bool timerPass =
         (timerIrqs & ps1::IRQ_TMR0) != 0 && irq.hasPendingInterrupt();
 
-    // Reuse the upstream GP0 FillRect test semantics on the actual ARM64 build.
-    ps1::gpu::GPU gpu;
+    // Keep the large GPU object off Horizon's application stack as well.
+    // GPU owns full VRAM/display buffers and is substantially larger than the
+    // small controller objects used by the earlier bootstrap.
+    static ps1::gpu::GPU gpu;
 
     // Validate the real Memory <-> DMA <-> GPU path. Keep other DMA devices
     // detached: this test exercises only channel 2 (GPU).
