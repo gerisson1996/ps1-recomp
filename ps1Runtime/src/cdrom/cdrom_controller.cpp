@@ -506,34 +506,25 @@ void CdromController::cmdInit() {
   mode_ = 0;
   motorOn_ = true;
 
-  // Cancel any pending secondary response from a previous command (e.g.,
-  // CdlPause INT2 that hasn't fired yet).  CdlInit is a full hardware reset;
-  // delivering a stale secondary after it would confuse the CdInit polling loop
-  // by re-triggering INT2 via the cdSyncByte watchpoint.
+  // CdlInit is a two-phase command on real hardware:
+  //   INT3 = command accepted, then INT2 = command complete.
+  //
+  // Keep the two IRQs observable as two distinct responses.  Native PsyQ
+  // command state machines can explicitly wait for/ack INT3 and only then
+  // wait for INT2.  Collapsing both responses synchronously into a single
+  // visible INT2 loses the first phase and leaves those state machines stuck.
   hasSecondaryResponse_ = false;
   secondaryResponseDelay_ = 0;
 
-  // Deliver INT3 (Acknowledge) immediately.
   pushResponse(INT_ACKNOWLEDGE, {buildStatusByte()});
 
-  // Deliver INT2 (Complete) immediately after INT3.
-  //
-  // The game's CdInit retry loop checks the CDROM interrupt flag register
-  // (interruptFlag_) after sending CdlInit to verify INT2 (Complete=2)
-  // was received.  Firing INT3 then INT2 in sequence ensures interruptFlag_=2
-  // when the game reads it, allowing the success condition to pass.
-  //
-  // On real hardware INT2 arrives ~300-400ms after INT3, but our HLE fires
-  // it synchronously.  hasSecondaryResponse_ is intentionally NOT set here --
-  // using the deferred secondary (via watchpoint) caused INT2 to fire
-  // BEFORE CdlInit was sent, leaving interruptFlag_=3 (INT3) when the game
-  // checked, which caused the 5-retry "CdInit: Init failed" loop.
-  responseFifo_.clear();
-  responseFifo_.push_back(buildStatusByte());
-  interruptFlag_ = static_cast<uint8_t>(INT_COMPLETE);
-  if (interruptCallback_)
-    interruptCallback_(static_cast<uint8_t>(INT_COMPLETE));
-  // hasSecondaryResponse_ = false (default) -- no deferred INT2 needed.
+  // Queue the completion response.  writeRegister() calls fireSecondaryNow()
+  // when the guest ACKs the primary interrupt, so INT2 becomes visible only
+  // after INT3 has actually been consumed.
+  hasSecondaryResponse_ = true;
+  secondaryResponseDelay_ = 0;
+  secondaryInterrupt_ = INT_COMPLETE;
+  secondaryData_ = {buildStatusByte()};
 }
 
 void CdromController::cmdMute() {
