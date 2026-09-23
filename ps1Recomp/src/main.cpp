@@ -245,7 +245,7 @@ int main(int argc, char *argv[]) {
     result_cpp += "#include <cstdint>\n";
     // The fatal path in recomp_dispatch prints a host stack, because the
     // guest RA is stale whenever the call came through a direct JAL.
-    result_cpp += "#include <execinfo.h>\n";
+    result_cpp += "#ifndef __SWITCH__\n#include <execinfo.h>\n#endif\n";
     result_cpp += "#include <fmt/format.h>\n";
     result_cpp += "#include <runtime/ps1_runtime_macros.h>\n";
     result_cpp += "#include <runtime/cpu_context.h>\n";
