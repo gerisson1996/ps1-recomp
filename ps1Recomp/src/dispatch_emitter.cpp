@@ -90,9 +90,11 @@ std::string emitDispatchBody() {
                    "           Set PS1_DISPATCH_PERMISSIVE=1 to log and continue instead.\n",
                    addr, phys, ps1LastIndirectSite(), ctx->r[31]);
         std::fflush(stderr);
+#ifndef __SWITCH__
         void* bt[24];
         int frames = backtrace(bt, 24);
         backtrace_symbols_fd(bt, frames, 2);
+#endif
         std::abort();
     }
     static std::unordered_map<uint32_t, uint32_t> s_unknownHits;
