@@ -43,13 +43,13 @@ all: $(OUTPUT).nro
 $(OUTPUT).nro: $(OUTPUT).elf
 $(OUTPUT).elf: $(OFILES)
 
-test_psx.o: $(CURDIR)/testdata/minimal.psx.exe
+test_psx.o: $(TOPDIR)/testdata/minimal.psx.exe
 	@echo embedding $(notdir $<)
-	@$(DEVKITPRO)/devkitA64/bin/aarch64-none-elf-objcopy -I binary -O elf64-littleaarch64 -B aarch64 \
-		--redefine-sym _binary__home_runner_work_ps1_recomp_ps1_recomp_switch_testdata_minimal_psx_exe_start=_binary_test_psx_start \
-		--redefine-sym _binary__home_runner_work_ps1_recomp_ps1_recomp_switch_testdata_minimal_psx_exe_end=_binary_test_psx_end \
-		--redefine-sym _binary__home_runner_work_ps1_recomp_ps1_recomp_switch_testdata_minimal_psx_exe_size=_binary_test_psx_size \
-		$< $@
+	@cd $(TOPDIR)/testdata && $(DEVKITPRO)/devkitA64/bin/aarch64-none-elf-objcopy -I binary -O elf64-littleaarch64 -B aarch64 \
+		--redefine-sym _binary_minimal_psx_exe_start=_binary_test_psx_start \
+		--redefine-sym _binary_minimal_psx_exe_end=_binary_test_psx_end \
+		--redefine-sym _binary_minimal_psx_exe_size=_binary_test_psx_size \
+		minimal.psx.exe $(CURDIR)/$@
 
 -include $(DEPENDS)
 endif
