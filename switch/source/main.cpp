@@ -8,6 +8,10 @@
 #include "../../ps1Runtime/include/runtime/gpu/gpu.h"
 #include "../../ps1Runtime/include/runtime/dma/dma.h"
 #include "../../ps1Runtime/include/runtime/memory.h"
+#include "../../ps1Runtime/include/runtime/cpu_context.h"
+
+void recomp_init_dispatch_table();
+void recomp_dispatch(uint8_t*, recomp_context*, uint32_t);
 #include "renderer_switch.h"
 
 void recomp_init_dispatch_table();
@@ -149,7 +153,19 @@ int main(int argc, char **argv) {
     std::printf("PS1 RAM: %zu bytes\n", sizeof(g_ps1_ram));
     std::printf("RAM mirror test: %s\n\n",
                 *word == 0x50533153 ? "PASS" : "FAIL");
-    std::printf("recompiled_out stub linked: PASS\n");
+    recomp_context recompCtx{};
+    recompCtx.reset();
+    recompCtx.mem = &memory;
+    recompCtx.bios = nullptr;
+    recomp_init_dispatch_table();
+    recomp_dispatch(memory.ramPtr(), &recompCtx, 0x80010000u);
+    const bool recompPass =
+        recompCtx.r[ps1::V0] == 42u &&
+        recompCtx.r[ps1::T0] == 40u &&
+        recompCtx.r[ps1::T1] == 2u &&
+        recompCtx.r[ps1::T2] == 0x12345678u &&
+        recompCtx.r[ps1::ZERO] == 0u;
+    std::printf("MIPS recomp/dispatch smoke: %s\n", recompPass ? "PASS" : "FAIL");
     std::printf("PS1 timer/IRQ core: %s\n", timerPass ? "PASS" : "FAIL");
     std::printf("PS1 GPU GP0/VRAM core: %s\n", gpuPass ? "PASS" : "FAIL");
     std::printf("PS1 RAM/DMA2/GPU path: %s\n", dmaGpuPass ? "PASS" : "FAIL");
