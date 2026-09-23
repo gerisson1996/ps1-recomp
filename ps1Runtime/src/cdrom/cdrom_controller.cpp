@@ -60,6 +60,7 @@ void CdromController::reset() {
   motorOn_ = false;
   shellOpen_ = false;
   pendingCommand_ = 0;
+  lastCommand_ = 0;
   commandPending_ = false;
 }
 
@@ -407,6 +408,9 @@ void CdromController::executeCommand(uint8_t cmd) {
   case 0x1B:
     cmdReadS();
     break;
+  case 0x1E:
+    cmdReadTOC();
+    break;
   default:
     CDROM_LOG("[CDROM] Unknown command: 0x{:02X}\n", cmd);
     pushResponse(INT_ERROR, {buildStatusByte(), 0x40}); // Invalid command
@@ -475,6 +479,24 @@ void CdromController::cmdReadN() {
 
 void CdromController::cmdReadS() {
   cmdReadN(); // Same as ReadN for our purposes
+}
+
+void CdromController::cmdReadTOC() {
+  // ReadTOC (0x1E) is a two-response command:
+  //   INT3 = accepted, INT2 = TOC read complete.
+  //
+  // The game only needs the command sequencing here; track positions are
+  // queried separately through GetTN/GetTD.  Keep the two interrupts distinct
+  // so native PsyQ polling code can acknowledge INT3 before observing INT2.
+  motorOn_ = true;
+  state_ = CdromState::Idle;
+
+  pushResponse(INT_ACKNOWLEDGE, {buildStatusByte()});
+
+  hasSecondaryResponse_ = true;
+  secondaryResponseDelay_ = 0;
+  secondaryInterrupt_ = INT_COMPLETE;
+  secondaryData_ = {buildStatusByte()};
 }
 
 void CdromController::cmdStop() {
