@@ -2,12 +2,6 @@
 
 namespace ps1recomp {
 
-#ifndef __SWITCH__
-#define PS1_FMT_PRINT(...) fmt::print(__VA_ARGS__)
-#else
-#define PS1_FMT_PRINT(...) std::printf(__VA_ARGS__)
-#endif
-
 std::string emitDispatchBody() {
   return R"CPP(void recomp_dispatch(uint8_t* rdram, recomp_context* ctx, uint32_t addr) {
     // Lazy-init on first call
@@ -18,7 +12,7 @@ std::string emitDispatchBody() {
         static bool nullDispatchWarned = false;
         if (!nullDispatchWarned) {
             nullDispatchWarned = true;
-            PS1_FMT_PRINT("[DISPATCH] null addr suppressed (startup transient, RA=0x{:08X})\n", ctx->r[31]);
+            fmt::print("[DISPATCH] null addr suppressed (startup transient, RA=0x{:08X})\n", ctx->r[31]);
         }
         return;
     }
@@ -35,6 +29,7 @@ std::string emitDispatchBody() {
         if (fn) { fn(rdram, ctx); return; }
     }
 
+#ifndef PS1_SWITCH_GPU_DMA_TEST
     // 4. BIOS entry points (A0, B0, C0 -- any KSEG mirror)
     if (ctx->bios) {
         if (phys == 0xA0) { ctx->bios->executeA0(); return; }
@@ -60,6 +55,7 @@ std::string emitDispatchBody() {
             return;
         }
     }
+#endif
 
     // 6. JR RA trampoline detection in RAM
     if (phys < 0x200000u) { // Within 2MB main RAM
@@ -88,7 +84,7 @@ std::string emitDispatchBody() {
         // to the wrong function.  The host stack always names the emitted
         // function that issued the dispatch; resolve it with
         //   addr2line -f -C -e build/ps1Runtime/ps1Runtime <offset>
-        PS1_FMT_PRINT(stderr,
+        fmt::print(stderr,
                    "[DISPATCH] FATAL: unmapped call to 0x{:08X} (phys=0x{:08X})\n"
                    "           issued from guest site 0x{:08X}; RA=0x{:08X}\n"
                    "           This address was never emitted by the recompiler.\n"
@@ -106,10 +102,10 @@ std::string emitDispatchBody() {
     static std::unordered_map<uint32_t, uint32_t> s_unknownHits;
     auto& hitCount = s_unknownHits[addr];
     if (hitCount < 5) {
-        PS1_FMT_PRINT(stderr, "[DISPATCH] Unknown target: 0x{:08X} (RA=0x{:08X}, phys=0x{:08X})\n",
+        fmt::print(stderr, "[DISPATCH] Unknown target: 0x{:08X} (RA=0x{:08X}, phys=0x{:08X})\n",
                    addr, ctx->r[31], phys);
     } else if (hitCount == 5) {
-        PS1_FMT_PRINT(stderr, "[DISPATCH] Unknown target: 0x{:08X} -- suppressing further logs\n", addr);
+        fmt::print(stderr, "[DISPATCH] Unknown target: 0x{:08X} -- suppressing further logs\n", addr);
     }
     hitCount++;
 }
