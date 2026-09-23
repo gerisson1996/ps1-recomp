@@ -16,6 +16,23 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Build host recompiler
+        run: |
+          cmake -S . -B build-host -DPS1RECOMP_BUILD_TESTS=OFF
+          cmake --build build-host --target ps1Recomp -j2
+
+      - name: Generate minimal PS-X EXE
+        run: python3 switch/testdata/make_minimal_psxexe.py
+
+      - name: Recompile MIPS smoke program
+        run: ./build-host/ps1Recomp/ps1Recomp switch/testdata/minimal.toml switch/source/recompiled_generated.cpp
+
+      - name: Verify generated source
+        run: |
+          test -s switch/source/recompiled_generated.cpp
+          grep -q "switch_smoke" switch/source/recompiled_generated.cpp
+          grep -q "recomp_init_dispatch_table" switch/source/recompiled_generated.cpp
+
       - name: Build NRO
         working-directory: switch
         run: make -j2
