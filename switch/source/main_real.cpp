@@ -43,6 +43,12 @@ constexpr uint32_t CYCLES_PER_FRAME = CPU_CLOCK / 60;
 constexpr uint32_t CYCLES_PER_SCANLINE = 3413;
 constexpr uint32_t SCANLINES_PER_FRAME = 263;
 
+// This exact KERNEL uses the native PsyQ/libetc VBlank counter at 0x8005B2FC.
+// Its VSync(-1) path reads this RAM word directly. The portable HLE counter
+// lives in PsyqState instead, so native CD boot code that waits a few VBlanks
+// can otherwise sit forever even while the host clock is advancing.
+constexpr uint32_t kNativeVsyncCounterAddr = 0x8005B2FCu;
+
 struct PsxExeBootInfo {
   uint32_t pc = 0;
   uint32_t gp = 0;
@@ -163,6 +169,12 @@ int main(int, char **) {
   std::printf("PC=%08X LOAD=%08X SIZE=%u GP=%08X SP=%08X\n",
               boot.pc, boot.loadAddr, boot.payloadSize, boot.gp,
               boot.spBase + boot.spOffset);
+
+  const bool nativeVsyncMirror =
+      boot.pc == 0x80010B08u && boot.loadAddr == 0x80010000u &&
+      boot.payloadSize == 985088u;
+  std::printf("Native VSync RAM mirror: %s\n",
+              nativeVsyncMirror ? "ON" : "OFF");
 
   static ps1::Memory memory;
   static ps1::gpu::GPU gpu;
@@ -304,6 +316,14 @@ int main(int, char **) {
         psyq.vsyncCounter.fetch_add(1, std::memory_order_release) + 1;
     psyq.vblankPending.store(true, std::memory_order_release);
 
+    // Bridge native libetc VSync(-1) to the cooperative host VBlank clock.
+    // Increment instead of assigning the host frame so a guest-side reset of
+    // the counter keeps its original semantics.
+    if (nativeVsyncMirror) {
+      const uint32_t nativeVb = memory.read32(kNativeVsyncCounterAddr);
+      memory.write32(kNativeVsyncCounterAddr, nativeVb + 1);
+    }
+
     bios.updatePadBuffers();
     gpu.snapshotDisplayBuffer();
 
@@ -330,7 +350,7 @@ int main(int, char **) {
           "[REAL] vsync=%u site=%08X RA=%08X SP=%08X GP=%08X\n"
           "       GPUSTAT=%08X DISP=%u,%u mode=%s\n"
           "       CD hw=%u IF=%u sector=%u mode=%02X cmd=%02X disc=%s\n"
-          "       CD sm=%u resp=%02X,%02X hleSync=%u hleReady=%u\n",
+          "       CD sm=%u resp=%02X,%02X hleSync=%u hleReady=%u nativeVB=%u\n",
           frame, ps1LastIndirectSite(), ctx.r[ps1::RA], ctx.r[ps1::SP],
           ctx.r[ps1::GP], gpu.readGPUSTAT(), dx, dy,
           gpu.isDisplayModeSet() ? "SET" : "DEFAULT",
@@ -342,7 +362,8 @@ int main(int, char **) {
           mountedDisc ? "YES" : "NO",
           cdSmState, cdResp0, cdResp1,
           static_cast<unsigned>(psyqDbg.cdSyncByte.load(std::memory_order_acquire)),
-          static_cast<unsigned>(psyqDbg.cdReadyByte.load(std::memory_order_acquire)));
+          static_cast<unsigned>(psyqDbg.cdReadyByte.load(std::memory_order_acquire)),
+          nativeVsyncMirror ? memory.read32(kNativeVsyncCounterAddr) : 0u);
       consoleUpdate(nullptr);
     }
   };
