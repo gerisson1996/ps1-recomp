@@ -25,7 +25,7 @@ export OUTPUT := $(CURDIR)/$(TARGET)
 export TOPDIR := $(CURDIR)
 export DEPSDIR := $(CURDIR)/$(BUILD)
 export LD := $(CXX)
-export VPATH := $(CURDIR)/source $(CURDIR)/../ps1Runtime/src
+export VPATH := $(CURDIR)/source $(CURDIR)/../ps1Runtime/src $(CURDIR)/../ps1Runtime/src/input
 export OFILES := $(addsuffix .o,$(CPPFILES:.cpp=))
 export INCLUDE := $(foreach dir,$(INCLUDES),-I$(CURDIR)/$(dir)) $(foreach dir,$(LIBDIRS),-I$(dir)/include)
 export LIBPATHS := $(foreach dir,$(LIBDIRS),-L$(dir)/lib)
