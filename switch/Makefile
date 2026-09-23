@@ -10,7 +10,7 @@ SOURCES := source ../ps1Runtime/src
 INCLUDES := include ../ps1Runtime/include source
 ARCH := -march=armv8-a+crc+crypto -mtune=cortex-a57 -mtp=soft -fPIE
 CFLAGS := -g -Wall -O2 -ffunction-sections $(ARCH) $(DEFINES)
-CFLAGS += $(INCLUDE) -D__SWITCH__
+CFLAGS += $(INCLUDE) -D__SWITCH__ -DPS1_SWITCH_GPU_DMA_TEST
 CXXFLAGS := $(CFLAGS) -std=gnu++20 -fno-rtti -ffunction-sections -fdata-sections
 ASFLAGS := -g $(ARCH)
 LDFLAGS = -specs=$(DEVKITPRO)/libnx/switch.specs -g $(ARCH) -Wl,--gc-sections -Wl,-Map,$(notdir $*.map)
