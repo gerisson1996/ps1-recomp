@@ -21,3 +21,8 @@ size = 52
 name = "switch_mmio_dma2_smoke"
 address = "80010080"
 size = 84
+
+[[functions]]
+name = "switch_gte_nclip_smoke"
+address = "800100D4"
+size = 52
