@@ -113,7 +113,9 @@ int main(int argc, char **argv) {
     const bool dmaLinkedListPass =
         dmaVram[180 * ps1::gpu::GPU::VRAM_WIDTH + 300].raw == dmaExpectedGreen &&
         dmaVram[203 * ps1::gpu::GPU::VRAM_WIDTH + 331].raw == dmaExpectedGreen &&
-        dmaVram[179 * ps1::gpu::GPU::VRAM_WIDTH + 300].raw == 0 &&
+        // The earlier red DMA block overlaps this coordinate, so use a clean
+        // outside pixel to prove the linked-list rectangle bounds.
+        dmaVram[179 * ps1::gpu::GPU::VRAM_WIDTH + 299].raw == 0 &&
         (dma.readRegister(0x1F8010A8) & (1u << 24)) == 0;
 
     gpu.writeGP0(0x020000FF); // red
