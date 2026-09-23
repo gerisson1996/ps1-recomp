@@ -61,3 +61,10 @@ jobs:
         with:
           name: ps1recomp-switch-bootstrap
           path: switch/ps1recomp_switch.nro
+
+      - name: Compile real-game harness with smoke recompiled source
+        run: |
+          cp switch/source/recompiled_generated.cpp switch/source/real_recompiled.cpp
+          make -C switch clean
+          make -C switch REAL_GAME=1 -j2
+          test -s switch/ps1recomp_game.nro
