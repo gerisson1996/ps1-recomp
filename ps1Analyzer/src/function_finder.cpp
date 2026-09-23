@@ -677,6 +677,20 @@ void FunctionFinder::linearSweep(const Section& text) {
 
         addFunction(addr, fmt::format("func_{:08X}", addr),
                     FunctionSource::LinearSweep);
+
+        // The sweep just proved the exact extent of this body. Keep it.
+        // PS-X EXE exposes the entire payload as one .text section, so using
+        // "distance to the next detected entry" later can append kilobytes of
+        // lookup tables, strings or assets to a valid function. That made the
+        // recompiler emit INVALID pseudo-instructions from game data.
+        for (auto &f : m_functions) {
+            if (f.address == addr && f.source == FunctionSource::LinearSweep &&
+                f.size == 0) {
+                f.size = end - addr;
+                break;
+            }
+        }
+
         starts.insert(addr);
         claimed.insert(claimed.begin() + static_cast<long>(ci), {addr, end});
         addr = end;
