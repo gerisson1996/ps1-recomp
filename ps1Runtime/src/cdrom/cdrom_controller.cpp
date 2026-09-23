@@ -337,6 +337,7 @@ void CdromController::pushResponse(CdromInt intType,
 // Command Dispatch
 
 void CdromController::executeCommand(uint8_t cmd) {
+  lastCommand_ = cmd;
   CDROM_LOG("[CDROM] Command 0x{:02X}\n", cmd);
 
   switch (cmd) {
