@@ -7,8 +7,19 @@ namespace ps1::gpu {
 bool RendererSwitch::init() {
   if (initialized_)
     return true;
-  framebufferCreate(&fb_, nwindowGetDefault(), 1280, 720,
-                    PIXEL_FORMAT_RGBA_8888, 2);
+  window_ = nwindowGetDefault();
+  if (!window_)
+    return false;
+
+  // The libnx console already owns the default window. Detach it before
+  // creating our framebuffer layer, otherwise consoleUpdate() can immediately
+  // present over the frame we just drew.
+  consoleExit(nullptr);
+
+  const Result rc = framebufferCreate(&fb_, window_, 1280, 720,
+                                      PIXEL_FORMAT_RGBA_8888, 2);
+  if (R_FAILED(rc))
+    return false;
   framebufferMakeLinear(&fb_);
   initialized_ = true;
   return true;
