@@ -393,6 +393,29 @@ TEST(InstructionEmitter, EmitFunction) {
   EXPECT_NE(code.find("delay slot"), std::string::npos);
 }
 
+TEST(InstructionEmitter, HelperDelayLabelsDoNotBecomeHexDispatchTargets) {
+  auto emitter = makeEmitter();
+
+  RecompFunction func;
+  func.name = "helper_label_test";
+  func.address = 0x80010000;
+  func.instructions = {
+      encI(0x04, 4, 0, 0),        // BEQ $a0,$zero -> delay-slot address
+      0x00000000,                  // NOP, also branch target
+      encR(0, 31, 0, 0, 0, 0x08), // JR $ra
+      0x00000000                   // NOP
+  };
+  func.isLabelTarget.resize(func.instructions.size(), false);
+  func.size = func.instructions.size() * 4;
+
+  auto code = emitter.emitFunction(func);
+
+  EXPECT_NE(code.find("L_dsdone_80010004"), std::string::npos);
+  EXPECT_EQ(code.find("recomp_dispatch(rdram, ctx, 0x0000000D)"),
+            std::string::npos)
+      << "L_dsdone_* must not be parsed as hex address 0xD";
+}
+
 TEST(InstructionEmitter, EmitFunctionWithBranch) {
   auto emitter = makeEmitter();
 
