@@ -329,7 +329,7 @@ int main(int, char **) {
       std::printf(
           "[REAL] vsync=%u site=%08X RA=%08X SP=%08X GP=%08X\n"
           "       GPUSTAT=%08X DISP=%u,%u mode=%s\n"
-          "       CD hw=%u IF=%u sector=%u mode=%02X disc=%s\n"
+          "       CD hw=%u IF=%u sector=%u mode=%02X cmd=%02X disc=%s\n"
           "       CD sm=%u resp=%02X,%02X hleSync=%u hleReady=%u\n",
           frame, ps1LastIndirectSite(), ctx.r[ps1::RA], ctx.r[ps1::SP],
           ctx.r[ps1::GP], gpu.readGPUSTAT(), dx, dy,
@@ -338,6 +338,7 @@ int main(int, char **) {
           static_cast<unsigned>(cdrom.interruptFlag()),
           cdrom.hasSectorReady() ? 1u : 0u,
           static_cast<unsigned>(cdrom.getMode()),
+          static_cast<unsigned>(cdrom.getLastCommand()),
           mountedDisc ? "YES" : "NO",
           cdSmState, cdResp0, cdResp1,
           static_cast<unsigned>(psyqDbg.cdSyncByte.load(std::memory_order_acquire)),
