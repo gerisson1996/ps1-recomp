@@ -1,5 +1,4 @@
 #include "runtime/timers/timers.h"
-#include <fmt/format.h>
 
 namespace ps1 {
 
