@@ -4,7 +4,17 @@ endif
 TOPDIR ?= $(CURDIR)
 include $(DEVKITPRO)/libnx/switch_rules
 
+REAL_GAME ?= 0
+ifeq ($(REAL_GAME),1)
+TARGET := ps1recomp_game
+APP_CPPFILES := main_real.cpp real_recompiled.cpp
+EXTRA_OFILES :=
+else
 TARGET := ps1recomp_switch
+APP_CPPFILES := main.cpp recompiled_generated.cpp
+EXTRA_OFILES := test_psx.o
+endif
+
 BUILD := build
 SOURCES := source ../ps1Runtime/src
 INCLUDES := include ../ps1Runtime/include ../third_party/fmt/include source
@@ -19,7 +29,7 @@ LIBDIRS := $(PORTLIBS) $(LIBNX)
 
 # Full portable PS1 runtime for Switch. Host-only SDL/OpenGL front-end files
 # remain excluded; RendererSwitch/libnx owns presentation and input.
-CPPFILES := main.cpp recompiled_generated.cpp renderer_switch.cpp \
+CPPFILES := $(APP_CPPFILES) renderer_switch.cpp \
 	gte.cpp metrics.cpp overlay_manager.cpp \
 	input.cpp timers.cpp gpu.cpp dma.cpp spu.cpp mdec.cpp \
 	cue_parser.cpp bin_reader.cpp iso9660.cpp exe_extractor.cpp virtual_fs.cpp cdrom_controller.cpp \
@@ -43,7 +53,7 @@ export VPATH := $(CURDIR)/source \
 	$(CURDIR)/../ps1Runtime/src/cdrom \
 	$(CURDIR)/../ps1Runtime/src/bios \
 	$(CURDIR)/../ps1Runtime/src/psyq
-export OFILES := $(addsuffix .o,$(CPPFILES:.cpp=)) test_psx.o
+export OFILES := $(addsuffix .o,$(CPPFILES:.cpp=)) $(EXTRA_OFILES)
 export INCLUDE := $(foreach dir,$(INCLUDES),-I$(CURDIR)/$(dir)) $(foreach dir,$(LIBDIRS),-I$(dir)/include)
 export LIBPATHS := $(foreach dir,$(LIBDIRS),-L$(dir)/lib)
 .PHONY: all clean
@@ -60,6 +70,7 @@ all: $(OUTPUT).nro
 $(OUTPUT).nro: $(OUTPUT).elf
 $(OUTPUT).elf: $(OFILES)
 
+ifeq ($(REAL_GAME),0)
 test_psx.o: $(TOPDIR)/testdata/minimal.psx.exe
 	@echo embedding $(notdir $<)
 	@cd $(TOPDIR)/testdata && $(DEVKITPRO)/devkitA64/bin/aarch64-none-elf-objcopy -I binary -O elf64-littleaarch64 -B aarch64 \
@@ -67,6 +78,7 @@ test_psx.o: $(TOPDIR)/testdata/minimal.psx.exe
 		--redefine-sym _binary_minimal_psx_exe_end=_binary_test_psx_end \
 		--redefine-sym _binary_minimal_psx_exe_size=_binary_test_psx_size \
 		minimal.psx.exe $(CURDIR)/$@
+endif
 
 -include $(DEPENDS)
 endif
