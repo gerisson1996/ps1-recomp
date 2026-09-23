@@ -246,7 +246,12 @@ int main(int argc, char *argv[]) {
     // The fatal path in recomp_dispatch prints a host stack, because the
     // guest RA is stale whenever the call came through a direct JAL.
     result_cpp += "#ifndef __SWITCH__\n#include <execinfo.h>\n#endif\n";
-    result_cpp += "#include <fmt/format.h>\n";
+    result_cpp += "#ifndef __SWITCH__\n#include <fmt/format.h>\n#endif\n";
+    result_cpp += "#ifdef __SWITCH__\n";
+    result_cpp += "namespace fmt {\n";
+    result_cpp += "template <typename... Args> inline void print(const char* s, Args&&...) { std::fputs(s, stdout); }\n";
+    result_cpp += "template <typename... Args> inline void print(FILE* f, const char* s, Args&&...) { std::fputs(s, f); }\n";
+    result_cpp += "}\n#endif\n";
     result_cpp += "#include <runtime/ps1_runtime_macros.h>\n";
     result_cpp += "#include <runtime/cpu_context.h>\n";
     result_cpp += "#include <runtime/gte.h>\n";
