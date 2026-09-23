@@ -159,6 +159,20 @@ int main(int argc, char **argv) {
     recompCtx.bios = nullptr;
     recomp_init_dispatch_table();
     recomp_dispatch(memory.ramPtr(), &recompCtx, 0x80010000u);
+    // Execute a second recompiled MIPS function whose SW instructions target
+    // the real PS1 GP0 MMIO register through Memory::write32().
+    recomp_context mmioCtx{};
+    mmioCtx.reset();
+    mmioCtx.mem = &memory;
+    mmioCtx.bios = nullptr;
+    recomp_dispatch(memory.ramPtr(), &mmioCtx, 0x8001004Cu);
+    const auto *mmioVram = gpu.getVRAM();
+    const uint16_t mmioExpectedBlue = static_cast<uint16_t>((255 >> 3) << 10);
+    const bool recompGpuMmioPass =
+        mmioVram[220 * ps1::gpu::GPU::VRAM_WIDTH + 360].raw == mmioExpectedBlue &&
+        mmioVram[231 * ps1::gpu::GPU::VRAM_WIDTH + 375].raw == mmioExpectedBlue &&
+        mmioVram[219 * ps1::gpu::GPU::VRAM_WIDTH + 360].raw == 0;
+
     const bool recompPass =
         recompCtx.r[ps1::T0] == 40u &&
         recompCtx.r[ps1::T1] == 2u &&
@@ -180,6 +194,7 @@ int main(int argc, char **argv) {
         std::printf("  RAM[80002000]=%08X expected=12345678\\n",
                     memory.read32(0x80002000u));
     }
+    std::printf("MIPS recomp -> GPU GP0 MMIO: %s\\n", recompGpuMmioPass ? "PASS" : "FAIL");
     std::printf("PS1 timer/IRQ core: %s\n", timerPass ? "PASS" : "FAIL");
     std::printf("PS1 GPU GP0/VRAM core: %s\n", gpuPass ? "PASS" : "FAIL");
     std::printf("PS1 RAM/DMA2/GPU path: %s\n", dmaGpuPass ? "PASS" : "FAIL");
