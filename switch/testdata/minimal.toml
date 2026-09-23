@@ -11,3 +11,8 @@ size = 64
 name = "switch_smoke_helper"
 address = "80010040"
 size = 12
+
+[[functions]]
+name = "switch_mmio_gpu_smoke"
+address = "8001004C"
+size = 52
