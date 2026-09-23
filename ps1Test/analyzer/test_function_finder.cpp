@@ -247,6 +247,36 @@ TEST(FunctionFinder, DetectsJALTargets) {
     cleanupFile(path);
 }
 
+TEST(FunctionFinder, RejectsJALLookingDataWhoseTargetIsNotCode) {
+    const std::string path = "/tmp/ps1recomp_test_ff_jal_data.elf";
+
+    // PS-X EXE payloads mix code and data. A 32-bit data value may have
+    // opcode 0x03 in its top bits and therefore look like a JAL. Point such a
+    // word at a NOP-only data tail: without target validation the analyzer
+    // invents a function there and the last bogus function can swallow the
+    // remainder of the executable.
+    std::vector<uint32_t> code(48, makeNOP());
+    code[2] = makeJR_RA(); // real entry function returns normally
+
+    const uint32_t fakeSource = 0x80010040;
+    const uint32_t fakeTarget = 0x80010080;
+    code[(fakeSource - 0x80010000) / 4] = makeJAL(fakeSource, fakeTarget);
+    // fakeTarget and everything after it intentionally remain NOP/data.
+
+    createElfWithCode(path, code);
+
+    ElfParser elf;
+    ASSERT_TRUE(elf.load(path));
+
+    FunctionFinder finder;
+    finder.findFunctions(elf);
+
+    EXPECT_EQ(finder.findByAddress(fakeTarget), nullptr);
+    EXPECT_EQ(finder.getJALTargets().count(fakeTarget), 0u);
+
+    cleanupFile(path);
+}
+
 // Function Finder -- Symbol Detection
 
 TEST(FunctionFinder, DetectsSymbolFunctions) {
