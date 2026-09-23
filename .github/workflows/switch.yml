@@ -18,13 +18,20 @@ jobs:
         with:
           submodules: recursive
 
-      - name: Build host recompiler
+      - name: Build host analyzer and recompiler
         run: |
           cmake -S . -B build-host -DPS1RECOMP_BUILD_TESTS=OFF -DPS1RECOMP_BUILD_RUNTIME=OFF
-          cmake --build build-host --target ps1Recomp -j2
+          cmake --build build-host --target ps1Analyzer ps1Recomp -j2
 
       - name: Generate minimal PS-X EXE
         run: python3 switch/testdata/make_minimal_psxexe.py
+
+      - name: Verify PS-X EXE named .BIN is not mistaken for disc image
+        run: |
+          cp switch/testdata/minimal.psx.exe switch/testdata/KERNEL.BIN
+          ./build-host/ps1Analyzer/ps1Analyzer switch/testdata/KERNEL.BIN switch/testdata/minimal_auto.toml
+          test -s switch/testdata/minimal_auto.toml
+          grep -q 'entry_point' switch/testdata/minimal_auto.toml
 
       - name: Recompile MIPS smoke program
         run: ./build-host/ps1Recomp/ps1Recomp switch/testdata/minimal.toml switch/source/recompiled_generated.cpp
