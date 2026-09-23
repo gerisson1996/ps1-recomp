@@ -5,6 +5,7 @@
 // Recovers the target set of a `jr $rx` so the emitter can turn it into local
 // gotos instead of a runtime dispatch.
 
+#include <cstddef>
 #include <cstdint>
 #include <vector>
 
