@@ -3,6 +3,7 @@
 #include <cstdint>
 #include "../../ps1Runtime/include/runtime/cpu_context.h"
 #include "../../ps1Runtime/include/runtime/emuptr.h"
+#include "../../ps1Runtime/include/runtime/input/input.h"
 
 void recomp_init_dispatch_table();
 void recomp_dispatch(uint8_t* rdram, recomp_context* ctx, uint32_t addr);
@@ -30,6 +31,9 @@ int main(int argc, char **argv) {
     recomp_init_dispatch_table();
     recomp_dispatch(g_ps1_ram, &ctx, 0);
 
+    ps1::input::InputController input;
+    input.setPadType(0, ps1::input::PadType::Digital);
+
     std::printf("PS1Recomp - Nintendo Switch\n");
     std::printf("ARM64/libnx bootstrap OK\n");
     std::printf("CPUContext size: %zu bytes\n", sizeof(ps1::CPUContext));
@@ -41,8 +45,35 @@ int main(int argc, char **argv) {
 
     while (appletMainLoop()) {
         padUpdate(&pad);
+        const u64 held = padGetButtons(&pad);
         if (padGetButtonsDown(&pad) & HidNpadButton_Plus)
             break;
+
+        // Reset active-low PS1 pad state, then map Switch controls.
+        constexpr uint16_t all =
+            ps1::input::BTN_SELECT | ps1::input::BTN_START |
+            ps1::input::BTN_UP | ps1::input::BTN_RIGHT |
+            ps1::input::BTN_DOWN | ps1::input::BTN_LEFT |
+            ps1::input::BTN_L1 | ps1::input::BTN_R1 |
+            ps1::input::BTN_L2 | ps1::input::BTN_R2 |
+            ps1::input::BTN_TRIANGLE | ps1::input::BTN_CIRCLE |
+            ps1::input::BTN_CROSS | ps1::input::BTN_SQUARE;
+        input.release(all);
+
+        if (held & HidNpadButton_A) input.press(ps1::input::BTN_CROSS);
+        if (held & HidNpadButton_B) input.press(ps1::input::BTN_CIRCLE);
+        if (held & HidNpadButton_X) input.press(ps1::input::BTN_TRIANGLE);
+        if (held & HidNpadButton_Y) input.press(ps1::input::BTN_SQUARE);
+        if (held & HidNpadButton_Up) input.press(ps1::input::BTN_UP);
+        if (held & HidNpadButton_Right) input.press(ps1::input::BTN_RIGHT);
+        if (held & HidNpadButton_Down) input.press(ps1::input::BTN_DOWN);
+        if (held & HidNpadButton_Left) input.press(ps1::input::BTN_LEFT);
+        if (held & HidNpadButton_L) input.press(ps1::input::BTN_L1);
+        if (held & HidNpadButton_R) input.press(ps1::input::BTN_R1);
+        if (held & HidNpadButton_ZL) input.press(ps1::input::BTN_L2);
+        if (held & HidNpadButton_ZR) input.press(ps1::input::BTN_R2);
+        if (held & HidNpadButton_Minus) input.press(ps1::input::BTN_SELECT);
+        if (held & HidNpadButton_Plus) input.press(ps1::input::BTN_START);
         consoleUpdate(nullptr);
     }
     consoleExit(nullptr);
