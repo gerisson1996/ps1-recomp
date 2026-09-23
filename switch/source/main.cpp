@@ -173,6 +173,22 @@ int main(int argc, char **argv) {
         mmioVram[231 * ps1::gpu::GPU::VRAM_WIDTH + 375].raw == mmioExpectedBlue &&
         mmioVram[219 * ps1::gpu::GPU::VRAM_WIDTH + 360].raw == 0;
 
+    // Third recompiled MIPS function prepares GP0 words in guest RAM and
+    // programs DMA2 MADR/BCR/CHCR through Memory MMIO.
+    recomp_context dmaMmioCtx{};
+    dmaMmioCtx.reset();
+    dmaMmioCtx.mem = &memory;
+    dmaMmioCtx.bios = nullptr;
+    recomp_dispatch(memory.ramPtr(), &dmaMmioCtx, 0x80010080u);
+    const auto *recompDmaVram = gpu.getVRAM();
+    const uint16_t recompDmaExpectedMagenta =
+        static_cast<uint16_t>((255 >> 3) | ((255 >> 3) << 10));
+    const bool recompDmaMmioPass =
+        recompDmaVram[260 * ps1::gpu::GPU::VRAM_WIDTH + 420].raw == recompDmaExpectedMagenta &&
+        recompDmaVram[279 * ps1::gpu::GPU::VRAM_WIDTH + 443].raw == recompDmaExpectedMagenta &&
+        recompDmaVram[259 * ps1::gpu::GPU::VRAM_WIDTH + 420].raw == 0 &&
+        (dma.readRegister(0x1F8010A8) & ((1u << 24) | (1u << 28))) == 0;
+
     const bool recompPass =
         recompCtx.r[ps1::T0] == 40u &&
         recompCtx.r[ps1::T1] == 2u &&
@@ -195,6 +211,7 @@ int main(int argc, char **argv) {
                     memory.read32(0x80002000u));
     }
     std::printf("MIPS recomp -> GPU GP0 MMIO: %s\\n", recompGpuMmioPass ? "PASS" : "FAIL");
+    std::printf("MIPS recomp -> DMA2 -> GPU: %s\\n", recompDmaMmioPass ? "PASS" : "FAIL");
     std::printf("PS1 timer/IRQ core: %s\n", timerPass ? "PASS" : "FAIL");
     std::printf("PS1 GPU GP0/VRAM core: %s\n", gpuPass ? "PASS" : "FAIL");
     std::printf("PS1 RAM/DMA2/GPU path: %s\n", dmaGpuPass ? "PASS" : "FAIL");
