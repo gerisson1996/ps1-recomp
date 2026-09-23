@@ -222,10 +222,12 @@ void DMA::executeBlockTransfer(uint32_t ch) {
 
   // Snapshot the CDROM sector before touching guest RAM, so the whole
   // transfer sees one sector and the ready flag is consumed atomically.
+#ifndef PS1_SWITCH_GPU_DMA_TEST
   std::array<uint8_t, ps1::cdrom::SECTOR_SIZE_RAW> payload{};
   uint32_t payloadBytes = 0;
   if (ch == CDROM_CH && !fromRam && cdrom_)
     payloadBytes = cdrom_->takeSectorPayload(payload.data(), payload.size());
+#endif
 
   for (uint32_t i = 0; i < totalWords; i++) {
     uint32_t physAddr = addr & 0x1FFFFC;
@@ -240,14 +242,9 @@ void DMA::executeBlockTransfer(uint32_t ch) {
         if (gpu_)
           gpu_->writeGP0(word);
         break;
+#ifndef PS1_SWITCH_GPU_DMA_TEST
       case SPU_CH:
         if (spu_) {
-          // Write through the SPU's transfer address register, which the game
-          // programs before starting the DMA and which auto-increments.
-          // Addressing by the loop index instead restarted every upload at
-          // sound RAM 0, so each one overwrote the last and the voices -- which
-          // read from their own startAddr, far from zero -- found silence.
-          // Measured: 16 non-zero bytes in the whole 512 KB.
           spu_->writeTransferData(word & 0xFFFF);
           spu_->writeTransferData((word >> 16) & 0xFFFF);
         }
@@ -256,6 +253,7 @@ void DMA::executeBlockTransfer(uint32_t ch) {
         if (mdec_)
           mdec_->writeCommand(word);
         break;
+#endif
       default:
         break;
       }
@@ -264,6 +262,7 @@ void DMA::executeBlockTransfer(uint32_t ch) {
       uint32_t word = 0;
 
       switch (ch) {
+#ifndef PS1_SWITCH_GPU_DMA_TEST
       case CDROM_CH:
         // `payload` was taken once, before the loop: the CDROM state machine
         // ticks on the render thread and drops the next sector on top of the
@@ -281,6 +280,7 @@ void DMA::executeBlockTransfer(uint32_t ch) {
         if (mdec_ && mdec_->dmaOutReady())
           word = mdec_->dmaOutRead();
         break;
+#endif
       default:
         break;
       }
