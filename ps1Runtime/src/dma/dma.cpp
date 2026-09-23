@@ -163,16 +163,14 @@ void DMA::executeChannel(uint32_t ch) {
 
   SyncMode sync = getSyncMode(ch);
 
+#ifndef PS1_SWITCH_GPU_DMA_TEST
   // CDROM device->RAM: defer when no sector is buffered.  On a real PS1 the
-  // DMA controller waits for a DRQ from the CDROM before transferring; we
-  // emulate that by leaving the start bit set so a later retry (driven from
-  // Bios::triggerCdromEvent INT1) will re-enter this function once the
-  // sector is ready.  Previously we would copy a zeroed sector and clear
-  // the start bit, dropping the read entirely on register-direct paths.
+  // DMA controller waits for a DRQ from the CDROM before transferring.
   if (ch == CDROM_CH && !isFromRam(ch) &&
       (!cdrom_ || !cdrom_->hasSectorReady())) {
     return;
   }
+#endif
 
   fmt::print("[DMA] Ch{} transfer: sync={}, fromRam={}, addr=0x{:08X}\n", ch,
              static_cast<int>(sync), isFromRam(ch), channels_[ch].baseAddr);
