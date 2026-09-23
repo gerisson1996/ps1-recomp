@@ -247,12 +247,11 @@ int main(int argc, char *argv[]) {
     // The fatal path in recomp_dispatch prints a host stack, because the
     // guest RA is stale whenever the call came through a direct JAL.
     result_cpp += "#ifndef __SWITCH__\n#include <execinfo.h>\n#endif\n";
-    result_cpp += "#ifndef __SWITCH__\n#include <fmt/format.h>\n#endif\n";
-    result_cpp += "#ifdef __SWITCH__\n";
-    result_cpp += "namespace fmt {\n";
-    result_cpp += "template <typename... Args> inline void print(const char* s, Args&&...) { ::fputs(s, stdout); }\n";
-    result_cpp += "template <typename Stream, typename... Args> inline void print(Stream* f, const char* s, Args&&...) { ::fputs(s, f); }\n";
-    result_cpp += "}\n#endif\n";
+    // fmt is available to both host and Switch builds. Keeping the real
+    // formatter on Horizon is important for bring-up: unmapped dispatch
+    // diagnostics must print the actual guest PC/RA instead of literal
+    // "{:08X}" placeholders.
+    result_cpp += "#include <fmt/format.h>\n";
     result_cpp += "#include <runtime/ps1_runtime_macros.h>\n";
     result_cpp += "#include <runtime/cpu_context.h>\n";
     result_cpp += "#include <runtime/gte.h>\n";
