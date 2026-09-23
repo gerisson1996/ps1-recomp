@@ -238,6 +238,11 @@ int main(int argc, char **argv) {
         if (held & HidNpadButton_Plus) input.press(ps1::input::BTN_START);
         consoleUpdate(nullptr);
     }
+    // RendererSwitch::destroy() is only needed after renderer.init() took
+    // ownership of the default window. Calling framebufferClose() on exit paths
+    // that never entered framebuffer mode has caused unstable teardown on
+    // Horizon/libnx. destroy() is already a no-op when not initialized.
     renderer.destroy();
+    consoleExit(nullptr);
     return 0;
 }
