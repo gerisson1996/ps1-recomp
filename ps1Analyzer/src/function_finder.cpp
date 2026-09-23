@@ -733,31 +733,19 @@ void FunctionFinder::linearSweep(const Section& text) {
             bound = *next;
         }
 
-        const std::vector<uint32_t> words = slice(addr, bound);
-        if (!validatesAsFunction(words, addr, bound)) {
+        // A real PS1 function is never expected to need an unbounded scan
+        // through the rest of a mixed code/data PS-X EXE. Keep the probe
+        // finite so a long table made entirely of valid-looking opcodes cannot
+        // turn the linear sweep quadratic.
+        constexpr uint32_t kLinearSweepValidationBytes = 0x10000;
+        const uint32_t probeBound =
+            std::min(bound, addr + kLinearSweepValidationBytes);
+        const auto endOpt = scanValidatedFunctionEnd(text, addr, probeBound);
+        if (!endOpt.has_value()) {
             addr += 4;
             continue;
         }
-
-        const uint32_t end = refineFunctionEnd(words, addr, bound);
-        if (end <= addr) {
-            addr += 4;
-            continue;
-        }
-        // `refineFunctionEnd` may run past the terminator `validatesAsFunction`
-        // stopped at, when a branch reaches further; re-check what it kept.
-        const size_t count = (end - addr) / 4;
-        bool unknown = false;
-        for (size_t i = 0; i < count && i < words.size(); ++i) {
-            if (!mips::isKnownInstruction(words[i])) {
-                unknown = true;
-                break;
-            }
-        }
-        if (unknown) {
-            addr += 4;
-            continue;
-        }
+        const uint32_t end = *endOpt;
 
         addFunction(addr, fmt::format("func_{:08X}", addr),
                     FunctionSource::LinearSweep);
