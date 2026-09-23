@@ -26,7 +26,7 @@ export TOPDIR := $(CURDIR)
 export DEPSDIR := $(CURDIR)/$(BUILD)
 export LD := $(CXX)
 export VPATH := $(CURDIR)/source $(CURDIR)/../ps1Runtime/src $(CURDIR)/../ps1Runtime/src/input $(CURDIR)/../ps1Runtime/src/timers $(CURDIR)/../ps1Runtime/src/gpu $(CURDIR)/../ps1Runtime/src/dma
-export OFILES := $(addsuffix .o,$(CPPFILES:.cpp=))
+export OFILES := $(addsuffix .o,$(CPPFILES:.cpp=)) test_psx.o
 export INCLUDE := $(foreach dir,$(INCLUDES),-I$(CURDIR)/$(dir)) $(foreach dir,$(LIBDIRS),-I$(dir)/include)
 export LIBPATHS := $(foreach dir,$(LIBDIRS),-L$(dir)/lib)
 .PHONY: all clean
@@ -42,5 +42,14 @@ DEPENDS := $(OFILES:.o=.d)
 all: $(OUTPUT).nro
 $(OUTPUT).nro: $(OUTPUT).elf
 $(OUTPUT).elf: $(OFILES)
+
+test_psx.o: $(CURDIR)/testdata/minimal.psx.exe
+	@echo embedding $(notdir $<)
+	@$(DEVKITPRO)/devkitA64/bin/aarch64-none-elf-objcopy -I binary -O elf64-littleaarch64 -B aarch64 \
+		--redefine-sym _binary__home_runner_work_ps1_recomp_ps1_recomp_switch_testdata_minimal_psx_exe_start=_binary_test_psx_start \
+		--redefine-sym _binary__home_runner_work_ps1_recomp_ps1_recomp_switch_testdata_minimal_psx_exe_end=_binary_test_psx_end \
+		--redefine-sym _binary__home_runner_work_ps1_recomp_ps1_recomp_switch_testdata_minimal_psx_exe_size=_binary_test_psx_size \
+		$< $@
+
 -include $(DEPENDS)
 endif
