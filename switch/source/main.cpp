@@ -2,6 +2,7 @@
 #include <cstdio>
 #include <cstdint>
 #include <cstring>
+#include <vector>
 #include "../../ps1Runtime/include/runtime/cpu_context.h"
 #include "../../ps1Runtime/include/runtime/emuptr.h"
 #include "../../ps1Runtime/include/runtime/input/input.h"
@@ -31,9 +32,8 @@ struct PsxExeBootInfo {
     uint32_t pc, gp, loadAddr, payloadSize, spBase, spOffset;
 };
 
-static bool loadPsxExeImage(const uint8_t *image, size_t imageSize,
-                            ps1::Memory &memory, recomp_context &ctx,
-                            PsxExeBootInfo &out) {
+static bool parsePsxExeHeader(const uint8_t *image, size_t imageSize,
+                              PsxExeBootInfo &out) {
     if (!image || imageSize < 0x800 || std::memcmp(image, "PS-X EXE", 8) != 0)
         return false;
     auto rd32 = [&](size_t off) -> uint32_t {
@@ -45,8 +45,15 @@ static bool loadPsxExeImage(const uint8_t *image, size_t imageSize,
     if (out.payloadSize == 0 || 0x800ull + out.payloadSize > imageSize)
         return false;
     const uint32_t phys = out.loadAddr & 0x1FFFFFu;
-    if (phys + out.payloadSize > 2u * 1024u * 1024u)
+    return phys + out.payloadSize <= 2u * 1024u * 1024u;
+}
+
+static bool loadPsxExeImage(const uint8_t *image, size_t imageSize,
+                            ps1::Memory &memory, recomp_context &ctx,
+                            PsxExeBootInfo &out) {
+    if (!parsePsxExeHeader(image, imageSize, out))
         return false;
+    const uint32_t phys = out.loadAddr & 0x1FFFFFu;
     std::memcpy(memory.ramPtr() + phys, image + 0x800, out.payloadSize);
     ctx.reset();
     ctx.mem = &memory;
@@ -54,6 +61,26 @@ static bool loadPsxExeImage(const uint8_t *image, size_t imageSize,
     ctx.r[ps1::GP] = out.gp;
     ctx.r[ps1::SP] = out.spBase + out.spOffset;
     return true;
+}
+
+static bool readSmallFile(const char *path, std::vector<uint8_t> &out) {
+    std::FILE *fp = std::fopen(path, "rb");
+    if (!fp)
+        return false;
+    if (std::fseek(fp, 0, SEEK_END) != 0) {
+        std::fclose(fp);
+        return false;
+    }
+    const long length = std::ftell(fp);
+    if (length < 0 || length > 3 * 1024 * 1024) {
+        std::fclose(fp);
+        return false;
+    }
+    std::rewind(fp);
+    out.resize(static_cast<size_t>(length));
+    const size_t got = out.empty() ? 0 : std::fread(out.data(), 1, out.size(), fp);
+    std::fclose(fp);
+    return got == out.size();
 }
 
 int main(int argc, char **argv) {
@@ -333,6 +360,35 @@ int main(int argc, char **argv) {
     std::printf("PS1 BIOS A0 dispatch: %s\\n", biosDispatchPass ? "PASS" : "FAIL");
     std::printf("PsyQ HLE registry: %s\\n", psyqRegistryPass ? "PASS" : "FAIL");
     std::printf("PS1 full device runtime: LINKED\\n");
+
+    // Real-game handoff probe: keep copyrighted disc/executable data off the
+    // public repository. The user can place an extracted PS-X EXE on the SD
+    // card and this build validates the exact header/load contract on hardware.
+    constexpr const char *externalKernelPath =
+        "sdmc:/switch/ps1recomp/KERNEL.BIN";
+    std::vector<uint8_t> externalKernel;
+    PsxExeBootInfo externalInfo{};
+    const bool externalRead = readSmallFile(externalKernelPath, externalKernel);
+    const bool externalValid =
+        externalRead &&
+        parsePsxExeHeader(externalKernel.data(), externalKernel.size(),
+                          externalInfo);
+    if (!externalRead) {
+        std::printf("External KERNEL.BIN: NOT FOUND\\n");
+        std::printf("  put it at sdmc:/switch/ps1recomp/KERNEL.BIN\\n");
+    } else if (!externalValid) {
+        std::printf("External KERNEL.BIN: INVALID PS-X EXE\\n");
+    } else {
+        std::printf("External KERNEL.BIN: READY\\n");
+        std::printf("  PC=%08X LOAD=%08X SIZE=%u\\n",
+                    externalInfo.pc, externalInfo.loadAddr,
+                    externalInfo.payloadSize);
+        std::printf("  GP=%08X SP=%08X\\n",
+                    externalInfo.gp,
+                    externalInfo.spBase + externalInfo.spOffset);
+        std::printf("  next: analyze/recompile this exact executable\\n");
+    }
+
     std::printf("PS1 timer/IRQ core: %s\n", timerPass ? "PASS" : "FAIL");
     std::printf("PS1 GPU GP0/VRAM core: %s\n", gpuPass ? "PASS" : "FAIL");
     std::printf("PS1 RAM/DMA2/GPU path: %s\n", dmaGpuPass ? "PASS" : "FAIL");
