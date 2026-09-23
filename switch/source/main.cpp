@@ -95,6 +95,27 @@ int main(int argc, char **argv) {
         dmaVram[139 * ps1::gpu::GPU::VRAM_WIDTH + 259].raw == dmaExpectedRed &&
         (dma.readRegister(0x1F8010A8) & ((1u << 24) | (1u << 28))) == 0;
 
+    // DMA2 linked-list mode: one node with three GP0 words and an end marker.
+    // Header: [31:24]=3 words, [23:0]=0xFFFFFF terminator.
+    constexpr uint32_t llAddr = 0x00018000;
+    putWord(llAddr + 0, (3u << 24) | 0x00FFFFFFu);
+    putWord(llAddr + 4, 0x0200FF00);              // green FillRect
+    putWord(llAddr + 8, (180u << 16) | 300u);    // x=300, y=180
+    putWord(llAddr + 12, (24u << 16) | 32u);     // 32x24
+
+    dma.writeRegister(0x1F8010A0, llAddr);
+    dma.writeRegister(0x1F8010A4, 0);
+    // from-RAM + sync mode 2 (linked list) + start/busy.
+    // Linked-list mode does not require the manual trigger bit.
+    dma.writeRegister(0x1F8010A8, (1u << 0) | (2u << 9) | (1u << 24));
+
+    const uint16_t dmaExpectedGreen = (255 >> 3) << 5;
+    const bool dmaLinkedListPass =
+        dmaVram[180 * ps1::gpu::GPU::VRAM_WIDTH + 300].raw == dmaExpectedGreen &&
+        dmaVram[203 * ps1::gpu::GPU::VRAM_WIDTH + 331].raw == dmaExpectedGreen &&
+        dmaVram[179 * ps1::gpu::GPU::VRAM_WIDTH + 300].raw == 0 &&
+        (dma.readRegister(0x1F8010A8) & (1u << 24)) == 0;
+
     gpu.writeGP0(0x020000FF); // red
     gpu.writeGP0(0x0014000A); // x=10, y=20
     gpu.writeGP0(0x00050005); // 5x5
@@ -122,13 +143,14 @@ int main(int argc, char **argv) {
     std::printf("PS1 RAM: %zu bytes\n", sizeof(g_ps1_ram));
     std::printf("RAM mirror test: %s\n\n",
                 *word == 0x50533153 ? "PASS" : "FAIL");
-    std::printf("recompiled_out stub linked: PASS\\n");
-    std::printf("PS1 timer/IRQ core: %s\\n", timerPass ? "PASS" : "FAIL");
-    std::printf("PS1 GPU GP0/VRAM core: %s\\n", gpuPass ? "PASS" : "FAIL");
-    std::printf("PS1 RAM/DMA2/GPU path: %s\\n", dmaGpuPass ? "PASS" : "FAIL");
-    std::printf("PS1 controller backend: ACTIVE\\n");
-    std::printf("Switch framebuffer: READY\\n");
-    std::printf("A red rectangle should appear after this screen.\\n");
+    std::printf("recompiled_out stub linked: PASS\n");
+    std::printf("PS1 timer/IRQ core: %s\n", timerPass ? "PASS" : "FAIL");
+    std::printf("PS1 GPU GP0/VRAM core: %s\n", gpuPass ? "PASS" : "FAIL");
+    std::printf("PS1 RAM/DMA2/GPU path: %s\n", dmaGpuPass ? "PASS" : "FAIL");
+    std::printf("PS1 DMA2 linked-list/GPU: %s\n", dmaLinkedListPass ? "PASS" : "FAIL");
+    std::printf("PS1 controller backend: ACTIVE\n");
+    std::printf("Switch framebuffer: READY\n");
+    std::printf("A red rectangle should appear after this screen.\n");
     std::printf("Press + to exit.\n");
 
     while (appletMainLoop()) {
