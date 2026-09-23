@@ -10,7 +10,9 @@
 #include <chrono>
 #include <cstdlib>
 #include <cstring>
+#ifndef __SWITCH__
 #include <execinfo.h>
+#endif
 #include <fmt/format.h>
 
 // Forward declare recomp_dispatch (defined in recompiled_out.cpp, global
@@ -470,12 +472,16 @@ void Bios::reportBadStackPointer(uint32_t sp) {
   ++badSpReports_;
   fmt::print(stderr, "[SP-GUARD] #{} guest $sp=0x{:08X} $ra=0x{:08X}\n",
              badSpReports_, sp, ctx_.r31);
+#ifndef __SWITCH__
   void *frames[24];
   int depth = backtrace(frames, 24);
   char **syms = backtrace_symbols(frames, depth);
   for (int i = 1; i < depth && i < 10; ++i)
     fmt::print(stderr, "[SP-GUARD]   #{} {}\n", i, syms ? syms[i] : "?");
   free(syms);
+#else
+  fmt::print(stderr, "[SP-GUARD]   host backtrace unavailable on Switch\n");
+#endif
 }
 
 void Bios::drainPendingCallbacksSlow() {
