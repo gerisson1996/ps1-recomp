@@ -15,10 +15,12 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          submodules: recursive
 
       - name: Build host recompiler
         run: |
-          cmake -S . -B build-host -DPS1RECOMP_BUILD_TESTS=OFF
+          cmake -S . -B build-host -DPS1RECOMP_BUILD_TESTS=OFF -DPS1RECOMP_BUILD_RUNTIME=OFF
           cmake --build build-host --target ps1Recomp -j2
 
       - name: Generate minimal PS-X EXE
