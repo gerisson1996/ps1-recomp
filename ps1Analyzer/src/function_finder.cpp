@@ -257,6 +257,36 @@ void FunctionFinder::addSymbolFunctions(const ElfParser& elf) {
 void FunctionFinder::scanJALTargets(const Section& text) {
     const uint32_t numInstructions = text.size / 4;
 
+    // PS-X EXE has no section table: its whole payload is exposed as .text,
+    // even though real games freely mix code, lookup tables and assets in that
+    // range. A data word whose top six bits happen to be 0x03 looks exactly
+    // like JAL. Do not turn that coincidence into a function unless the target
+    // itself decodes as a self-contained R3000A function.
+    //
+    // 64 KiB is deliberately only a validation horizon, not a function-size
+    // limit in the generated config. It prevents a bogus target in a large
+    // zero/data tail from making this pass walk the rest of a multi-megabyte
+    // executable for every candidate.
+    constexpr uint32_t kJalValidationBytes = 0x10000;
+
+    auto targetLooksLikeFunction = [&](uint32_t target) {
+        if (!text.containsAddress(target) || target < text.vaddr)
+            return false;
+
+        const uint32_t sectionEnd = text.vaddr + text.size;
+        const uint32_t hardEnd =
+            std::min(sectionEnd, target + kJalValidationBytes);
+        if (hardEnd <= target)
+            return false;
+
+        std::vector<uint32_t> candidate;
+        candidate.reserve((hardEnd - target) / 4);
+        for (uint32_t addr = target; addr + 4 <= hardEnd; addr += 4)
+            candidate.push_back(readInstruction(text, addr - text.vaddr));
+
+        return validatesAsFunction(candidate, target, hardEnd);
+    };
+
     for (uint32_t i = 0; i < numInstructions; ++i) {
         uint32_t instr = readInstruction(text, i * 4);
         uint32_t pc = text.vaddr + (i * 4);
@@ -264,12 +294,10 @@ void FunctionFinder::scanJALTargets(const Section& text) {
         if (mips::isJAL(instr)) {
             uint32_t target = mips::jalTarget(pc, instr);
 
-            // Only accept targets within the text section
-            if (text.containsAddress(target)) {
+            if (text.containsAddress(target) && targetLooksLikeFunction(target)) {
                 m_jalTargets.insert(target);
 
                 if (!hasFunction(target)) {
-                    // Generate name based on address
                     std::string name = fmt::format("func_{:08X}", target);
                     addFunction(target, name, FunctionSource::JALTarget);
                 }
