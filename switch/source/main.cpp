@@ -170,7 +170,17 @@ int main(int argc, char **argv) {
         recompCtx.r[ps1::V0] == 43u &&
         memory.read32(0x80002000u) == 0x12345678u &&
         recompCtx.r[ps1::ZERO] == 0u;
-    std::printf("MIPS recomp LW/SW/branch/JAL: %s\n", recompPass ? "PASS" : "FAIL");
+    std::printf("MIPS recomp LW/SW/branch/JAL: %s\\n", recompPass ? "PASS" : "FAIL");
+    if (!recompPass) {
+        std::printf("  V0=%08X T0=%08X T1=%08X T2=%08X\\n",
+                    recompCtx.r[ps1::V0], recompCtx.r[ps1::T0],
+                    recompCtx.r[ps1::T1], recompCtx.r[ps1::T2]);
+        std::printf("  T4=%08X T5=%08X T6=%08X RA=%08X\\n",
+                    recompCtx.r[ps1::T4], recompCtx.r[ps1::T5],
+                    recompCtx.r[ps1::T6], recompCtx.r[ps1::RA]);
+        std::printf("  RAM[80002000]=%08X expected=12345678\\n",
+                    memory.read32(0x80002000u));
+    }
     std::printf("PS1 timer/IRQ core: %s\n", timerPass ? "PASS" : "FAIL");
     std::printf("PS1 GPU GP0/VRAM core: %s\n", gpuPass ? "PASS" : "FAIL");
     std::printf("PS1 RAM/DMA2/GPU path: %s\n", dmaGpuPass ? "PASS" : "FAIL");
