@@ -38,6 +38,30 @@ words = [
     0xADE80000, # sw    t0, 0(t7)
     0x03E00008, # jr    ra
     0x00000000, # nop
+
+    # DMA2 MMIO smoke: RAM commands -> DMA2 registers -> GPU.
+    0x3C098000, # lui   t1, 0x8000
+    0x35293000, # ori   t1, t1, 0x3000
+    0x3C0A02FF, # lui   t2, 0x02FF
+    0x354A00FF, # ori   t2, t2, 0x00FF => magenta FillRect
+    0xAD2A0000, # sw    t2, 0(t1)
+    0x3C0B0104, # lui   t3, 0x0104
+    0x356B01A4, # ori   t3, t3, 0x01A4 => y=260,x=420
+    0xAD2B0004, # sw    t3, 4(t1)
+    0x3C0C0014, # lui   t4, 0x0014
+    0x358C0018, # ori   t4, t4, 0x0018 => h=20,w=24
+    0xAD2C0008, # sw    t4, 8(t1)
+    0x3C0D1F80, # lui   t5, 0x1F80
+    0x35AD10A0, # ori   t5, t5, 0x10A0 => DMA2 MADR
+    0x240E3000, # addiu t6, zero, 0x3000
+    0xADAE0000, # sw    t6, 0(t5) MADR
+    0x240F0003, # addiu t7, zero, 3
+    0xADAF0004, # sw    t7, 4(t5) BCR
+    0x3C181100, # lui   t8, 0x1100
+    0x37180001, # ori   t8, t8, 1 => fromRAM + start + manual trigger
+    0xADB80008, # sw    t8, 8(t5) CHCR; transfer executes synchronously
+    0x03E00008, # jr    ra
+    0x00000000, # nop
 ]
 header = bytearray(0x800)
 header[0:8] = b"PS-X EXE"
