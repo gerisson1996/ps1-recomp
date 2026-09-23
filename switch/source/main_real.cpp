@@ -19,6 +19,7 @@
 #include "../../ps1Runtime/include/runtime/input/input.h"
 #include "../../ps1Runtime/include/runtime/mdec/mdec.h"
 #include "../../ps1Runtime/include/runtime/memory.h"
+#include "../../ps1Runtime/include/runtime/ps1_runtime_macros.h"
 #include "../../ps1Runtime/include/runtime/psyq/psyq_hle.h"
 #include "../../ps1Runtime/include/runtime/psyq/psyq_registry.h"
 #include "../../ps1Runtime/include/runtime/psyq/psyq_state.h"
@@ -300,15 +301,27 @@ int main(int, char **) {
     bios.updatePadBuffers();
     gpu.snapshotDisplayBuffer();
 
-    // Keep the diagnostic console visible during early boot so an unmapped
-    // dispatch address is readable. After a few seconds, switch to VRAM.
-    if (!rendererActive && frame >= 180) {
+    // Diagnostic-first bring-up: never hide the console automatically.
+    // The previous 3-second auto-switch made a healthy-but-not-drawing game
+    // indistinguishable from a crash because the framebuffer was simply black.
+    // Keep printing live guest state until the user explicitly presses R3.
+    if (!rendererActive && (held & HidNpadButton_StickR)) {
+      std::printf("[REAL] R3 -> switching to VRAM\n");
+      consoleUpdate(nullptr);
       rendererActive = renderer.init();
     }
+
     if (rendererActive) {
       renderer.renderFrame();
-    } else if ((frame % 30) == 0) {
-      std::printf("[REAL] running, vsync=%u  (PLUS+MINUS exits)\n", frame);
+    } else if ((frame % 60) == 0) {
+      uint32_t dx = 0, dy = 0;
+      gpu.getDisplayArea(dx, dy);
+      std::printf(
+          "[REAL] vsync=%u site=%08X RA=%08X SP=%08X GP=%08X\n"
+          "       GPUSTAT=%08X DISP=%u,%u mode=%s\n",
+          frame, ps1LastIndirectSite(), ctx.r[ps1::RA], ctx.r[ps1::SP],
+          ctx.r[ps1::GP], gpu.readGPUSTAT(), dx, dy,
+          gpu.isDisplayModeSet() ? "SET" : "DEFAULT");
       consoleUpdate(nullptr);
     }
   };
@@ -318,8 +331,8 @@ int main(int, char **) {
   ctx.pc = boot.pc;
 
   std::printf("Dispatch table ready. Starting PC=%08X\n", boot.pc);
-  std::printf("First 3 seconds stay on console for diagnostics.\n");
-  std::printf("PLUS+MINUS = exit\n");
+  std::printf("Diagnostic console stays visible.\n");
+  std::printf("R3 = show VRAM | PLUS+MINUS = exit\n");
   consoleUpdate(nullptr);
 
   // This call normally never returns: the recompiled game owns the thread.
