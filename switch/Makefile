@@ -7,7 +7,7 @@ include $(DEVKITPRO)/libnx/switch_rules
 TARGET := ps1recomp_switch
 BUILD := build
 SOURCES := source ../ps1Runtime/src
-INCLUDES := include ../ps1Runtime/include
+INCLUDES := include ../ps1Runtime/include source
 ARCH := -march=armv8-a+crc+crypto -mtune=cortex-a57 -mtp=soft -fPIE
 CFLAGS := -g -Wall -O2 -ffunction-sections $(ARCH) $(DEFINES)
 CFLAGS += $(INCLUDE) -D__SWITCH__
@@ -18,7 +18,7 @@ LIBS := -lnx
 LIBDIRS := $(PORTLIBS) $(LIBNX)
 
 # Milestone 2 links the recompiler ABI stub plus portable CPU/emuptr headers.
-CPPFILES := main.cpp recompiled_out_stub.cpp input.cpp timers.cpp gpu.cpp metrics.cpp
+CPPFILES := main.cpp recompiled_out_stub.cpp input.cpp timers.cpp gpu.cpp metrics.cpp renderer_switch.cpp
 
 ifneq ($(BUILD),$(notdir $(CURDIR)))
 export OUTPUT := $(CURDIR)/$(TARGET)
