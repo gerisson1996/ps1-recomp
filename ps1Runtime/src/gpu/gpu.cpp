@@ -1,6 +1,7 @@
 #include "runtime/gpu/gpu.h"
 #ifndef __SWITCH__
 #include <execinfo.h>
+#include <fmt/format.h>
 #endif
 #include <cstdlib>
 #include "runtime/metrics.h"
@@ -8,7 +9,6 @@
 #include <cstdio>
 #include <cstring>
 #include <cstdint>
-#include <fmt/format.h>
 #include <initializer_list>
 #include <unordered_map>
 #include <utility>
