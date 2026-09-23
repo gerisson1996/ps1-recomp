@@ -226,6 +226,17 @@ int main(int argc, char **argv) {
         recompDmaVram[259 * ps1::gpu::GPU::VRAM_WIDTH + 420].raw == 0 &&
         (dma.readRegister(0x1F8010A8) & ((1u << 24) | (1u << 28))) == 0;
 
+    // Fourth recompiled MIPS function exercises COP2/GTE. It loads three SXY
+    // vertices, executes NCLIP and reads MAC0 back through MFC2.
+    recomp_context gteCtx{};
+    gteCtx.reset();
+    gteCtx.mem = &memory;
+    gteCtx.bios = nullptr;
+    recomp_dispatch(memory.ramPtr(), &gteCtx, 0x800100D4u);
+    const bool recompGtePass =
+        gteCtx.r[ps1::V0] == 400u &&
+        gteCtx.cop2d[24] == 400u;
+
     const bool recompPass =
         recompCtx.r[ps1::T0] == 40u &&
         recompCtx.r[ps1::T1] == 2u &&
@@ -250,6 +261,7 @@ int main(int argc, char **argv) {
     }
     std::printf("MIPS recomp -> GPU GP0 MMIO: %s\\n", recompGpuMmioPass ? "PASS" : "FAIL");
     std::printf("MIPS recomp -> DMA2 -> GPU: %s\\n", recompDmaMmioPass ? "PASS" : "FAIL");
+    std::printf("MIPS recomp -> GTE NCLIP: %s\\n", recompGtePass ? "PASS" : "FAIL");
     std::printf("PS1 timer/IRQ core: %s\n", timerPass ? "PASS" : "FAIL");
     std::printf("PS1 GPU GP0/VRAM core: %s\n", gpuPass ? "PASS" : "FAIL");
     std::printf("PS1 RAM/DMA2/GPU path: %s\n", dmaGpuPass ? "PASS" : "FAIL");
