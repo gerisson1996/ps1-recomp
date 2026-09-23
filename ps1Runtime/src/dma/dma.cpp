@@ -7,7 +7,11 @@
 #include "runtime/spu/spu.h"
 #include <algorithm>
 #include <cstdlib>
+#ifndef __SWITCH__
 #include <fmt/format.h>
+#else
+namespace fmt { template <typename... Args> inline void print(const char*, Args&&...) {} template <typename... Args> inline void print(FILE*, const char*, Args&&...) {} }
+#endif
 
 namespace ps1 {
 
