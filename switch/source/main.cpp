@@ -69,6 +69,10 @@ int main(int argc, char **argv) {
     dma.setMemory(&memory);
     dma.setGPU(&gpu);
 
+    // DMA reset value 0x07654321 leaves channel 2's enable bit (DPCR bit 11)
+    // clear. Enable GPU DMA explicitly, as the PS1 BIOS normally does.
+    dma.writeRegister(0x1F8010F0, dma.readRegister(0x1F8010F0) | (1u << 11));
+
     // Three GP0 words in guest RAM: FillRect(red), position, size.
     constexpr uint32_t dmaCmd = 0x00010000;
     auto *dmaRam = memory.ramPtr();
