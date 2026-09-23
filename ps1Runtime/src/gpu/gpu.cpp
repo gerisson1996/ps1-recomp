@@ -1,5 +1,7 @@
 #include "runtime/gpu/gpu.h"
+#ifndef __SWITCH__
 #include <execinfo.h>
+#endif
 #include <cstdlib>
 #include "runtime/metrics.h"
 #include <algorithm>
@@ -10,6 +12,13 @@
 #include <initializer_list>
 #include <unordered_map>
 #include <utility>
+
+#ifdef __SWITCH__
+namespace fmt {
+template <typename... Args> inline void print(const char *, Args&&...) {}
+template <typename... Args> inline void print(FILE *, const char *, Args&&...) {}
+}
+#endif
 
 namespace ps1::gpu {
 
@@ -101,6 +110,7 @@ uint32_t GPU::readGPUREAD() {
 }
 
 void GPU::writeGP0(uint32_t val) {
+#ifndef __SWITCH__
   // `PS1_GP0_TRACE=<hex opcode>` prints a host backtrace on the first few
   // GP0 commands with that opcode.  Crash writes GP0 directly rather than
   // through DMA, so the backtrace names the recompiled guest function that
@@ -144,6 +154,13 @@ void GPU::writeGP0(uint32_t val) {
       }
     }
   }
+#else
+  gp0Words_.fetch_add(1, std::memory_order_relaxed);
+  if (!vramTransfer_.isWritingToVRAM && !isCommandExecuting_) {
+    const uint8_t op = val >> 24;
+    gp0Hist_[op].fetch_add(1, std::memory_order_relaxed);
+  }
+#endif
   if (vramTransfer_.isWritingToVRAM) {
     uint16_t p1 = val & 0xFFFF;
     uint16_t p2 = (val >> 16) & 0xFFFF;
