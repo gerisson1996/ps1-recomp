@@ -112,6 +112,10 @@ public:
     std::lock_guard<std::recursive_mutex> lk(mtx_);
     return mode_;
   }
+  uint8_t getLastCommand() const {
+    std::lock_guard<std::recursive_mutex> lk(mtx_);
+    return lastCommand_;
+  }
   bool hasSectorReady() const {
     std::lock_guard<std::recursive_mutex> lk(mtx_);
     return sectorReady_;
@@ -230,6 +234,7 @@ private:
 
   // Command processing
   uint8_t pendingCommand_ = 0;
+  uint8_t lastCommand_ = 0;
   bool commandPending_ = false;
 
   // Secondary Response (INT5)
