@@ -18,7 +18,7 @@ LIBS := -lnx
 LIBDIRS := $(PORTLIBS) $(LIBNX)
 
 # Milestone 2 links the recompiler ABI stub plus portable CPU/emuptr headers.
-CPPFILES := main.cpp recompiled_out_stub.cpp
+CPPFILES := main.cpp recompiled_out_stub.cpp input.cpp
 
 ifneq ($(BUILD),$(notdir $(CURDIR)))
 export OUTPUT := $(CURDIR)/$(TARGET)
