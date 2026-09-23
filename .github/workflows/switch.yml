@@ -1,0 +1,27 @@
+name: Nintendo Switch bootstrap
+
+on:
+  push:
+    branches: [ switch-port ]
+  pull_request:
+    branches: [ main ]
+  workflow_dispatch:
+
+jobs:
+  build-switch:
+    runs-on: ubuntu-latest
+    container:
+      image: devkitpro/devkita64:latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Build NRO
+        working-directory: switch
+        run: make -j2
+
+      - name: Upload NRO
+        uses: actions/upload-artifact@v4
+        with:
+          name: ps1recomp-switch-bootstrap
+          path: switch/ps1recomp_switch.nro
