@@ -249,6 +249,7 @@ private:
   void cmdSetLoc();
   void cmdReadN();
   void cmdReadS();
+  void cmdReadTOC();
   void cmdStop();
   void cmdPause();
   void cmdInit();
