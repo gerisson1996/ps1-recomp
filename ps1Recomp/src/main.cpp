@@ -250,7 +250,7 @@ int main(int argc, char *argv[]) {
     result_cpp += "#ifdef __SWITCH__\n";
     result_cpp += "namespace fmt {\n";
     result_cpp += "template <typename... Args> inline void print(const char* s, Args&&...) { std::fputs(s, stdout); }\n";
-    result_cpp += "template <typename... Args> inline void print(FILE* f, const char* s, Args&&...) { std::fputs(s, f); }\n";
+    result_cpp += "template <typename... Args> inline void print(std::FILE* f, const char* s, Args&&...) { std::fputs(s, f); }\n";
     result_cpp += "}\n#endif\n";
     result_cpp += "#include <runtime/ps1_runtime_macros.h>\n";
     result_cpp += "#include <runtime/cpu_context.h>\n";
