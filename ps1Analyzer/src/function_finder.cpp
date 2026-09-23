@@ -346,15 +346,9 @@ void FunctionFinder::scanJALTargets(const Section& text) {
         const uint32_t sectionEnd = text.vaddr + text.size;
         const uint32_t hardEnd =
             std::min(sectionEnd, target + kJalValidationBytes);
-        if (hardEnd <= target)
-            return false;
-
-        std::vector<uint32_t> candidate;
-        candidate.reserve((hardEnd - target) / 4);
-        for (uint32_t addr = target; addr + 4 <= hardEnd; addr += 4)
-            candidate.push_back(readInstruction(text, addr - text.vaddr));
-
-        const bool valid = validatesAsFunction(candidate, target, hardEnd);
+        const bool valid =
+            hardEnd > target &&
+            scanValidatedFunctionEnd(text, target, hardEnd).has_value();
         jalTargetValidationCache[target] = valid;
         return valid;
     };
