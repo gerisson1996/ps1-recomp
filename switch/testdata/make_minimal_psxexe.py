@@ -66,8 +66,11 @@ words = [
 header = bytearray(0x800)
 header[0:8] = b"PS-X EXE"
 struct.pack_into("<I", header, 0x10, 0x80010000) # initial PC
+struct.pack_into("<I", header, 0x14, 0x80018000) # initial GP
 struct.pack_into("<I", header, 0x18, 0x80010000) # load address
 struct.pack_into("<I", header, 0x1C, len(words) * 4)
+struct.pack_into("<I", header, 0x30, 0x801FFF00) # initial SP base
+struct.pack_into("<I", header, 0x34, 0x00000040) # initial SP offset
 out = Path(__file__).with_name("minimal.psx.exe")
 out.write_bytes(header + b"".join(struct.pack("<I", w) for w in words))
 print(out)
