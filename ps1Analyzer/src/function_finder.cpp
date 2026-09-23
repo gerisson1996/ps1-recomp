@@ -4,6 +4,7 @@
 #include "ps1recomp/function_finder.h"
 
 #include <algorithm>
+#include <optional>
 #include <unordered_map>
 #include <fmt/format.h>
 
@@ -141,6 +142,70 @@ bool isFunctionEnd(const std::vector<uint32_t> &words, size_t idx) {
   }
   // Nothing in this range wrote it, so it came in from the caller.
   return true;
+}
+
+/// Validate one candidate body without first copying the entire gap to the
+/// next known entry point.
+///
+/// PS-X EXE exposes code + data as one synthetic .text section.  The old
+/// linear sweep built a vector from every candidate address all the way to the
+/// next known function before it could discover that the *first* word was
+/// data.  In a large asset/table tail that is quadratic work.  This scanner
+/// grows only as far as the first invalid encoding or the real return.
+///
+/// On success returns one-past-the-body, including the return delay slot.
+std::optional<uint32_t> scanValidatedFunctionEnd(const Section &text,
+                                                 uint32_t startAddr,
+                                                 uint32_t maxEndAddr) {
+  if (!text.data || startAddr < text.vaddr ||
+      startAddr >= text.vaddr + text.size || maxEndAddr <= startAddr)
+    return std::nullopt;
+
+  const uint32_t textEnd = text.vaddr + text.size;
+  maxEndAddr = std::min(maxEndAddr, textEnd);
+
+  auto readWord = [&](uint32_t addr) {
+    const uint32_t off = addr - text.vaddr;
+    const uint8_t *p = text.data + off;
+    return static_cast<uint32_t>(p[0]) |
+           (static_cast<uint32_t>(p[1]) << 8) |
+           (static_cast<uint32_t>(p[2]) << 16) |
+           (static_cast<uint32_t>(p[3]) << 24);
+  };
+
+  std::vector<uint32_t> words;
+  words.reserve(std::min<uint32_t>((maxEndAddr - startAddr) / 4, 256u));
+  uint32_t reach = startAddr;
+
+  for (uint32_t addr = startAddr; addr + 4 <= maxEndAddr; addr += 4) {
+    const uint32_t word = readWord(addr);
+    if (!mips::isKnownInstruction(word))
+      return std::nullopt;
+
+    words.push_back(word);
+    const size_t idx = words.size() - 1;
+
+    if (mips::isBranch(word) || mips::isJ(word)) {
+      const uint32_t target = mips::isJ(word)
+                                  ? mips::jalTarget(addr, word)
+                                  : mips::branchTarget(addr, word);
+      if (target > reach && target > startAddr && target < maxEndAddr)
+        reach = target;
+    }
+
+    if (!isFunctionEnd(words, idx) || addr < reach)
+      continue;
+
+    uint32_t end = std::min<uint32_t>(addr + 8, maxEndAddr);
+    // A return's delay slot is part of the body.  Match the old
+    // validate+refine path by refusing a candidate whose reachable delay word
+    // is not an R3000A instruction.
+    if (addr + 4 < end && !mips::isKnownInstruction(readWord(addr + 4)))
+      return std::nullopt;
+    return end;
+  }
+
+  return std::nullopt;
 }
 
 } // namespace
