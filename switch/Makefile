@@ -10,22 +10,39 @@ SOURCES := source ../ps1Runtime/src
 INCLUDES := include ../ps1Runtime/include ../third_party/fmt/include source
 ARCH := -march=armv8-a+crc+crypto -mtune=cortex-a57 -mtp=soft -fPIE
 CFLAGS := -g -Wall -O2 -ffunction-sections $(ARCH) $(DEFINES)
-CFLAGS += $(INCLUDE) -D__SWITCH__ -DPS1_SWITCH_GPU_DMA_TEST
+CFLAGS += $(INCLUDE) -D__SWITCH__ -DFMT_HEADER_ONLY=1
 CXXFLAGS := $(CFLAGS) -std=gnu++20 -fno-rtti -ffunction-sections -fdata-sections
 ASFLAGS := -g $(ARCH)
 LDFLAGS = -specs=$(DEVKITPRO)/libnx/switch.specs -g $(ARCH) -Wl,--gc-sections -Wl,-Map,$(notdir $*.map)
 LIBS := -lnx
 LIBDIRS := $(PORTLIBS) $(LIBNX)
 
-# Milestone 2 links the recompiler ABI stub plus portable CPU/emuptr headers.
-CPPFILES := main.cpp recompiled_generated.cpp input.cpp timers.cpp gpu.cpp metrics.cpp renderer_switch.cpp dma.cpp gte.cpp
+# Full portable PS1 runtime for Switch. Host-only SDL/OpenGL front-end files
+# remain excluded; RendererSwitch/libnx owns presentation and input.
+CPPFILES := main.cpp recompiled_generated.cpp renderer_switch.cpp \
+	gte.cpp metrics.cpp overlay_manager.cpp \
+	input.cpp timers.cpp gpu.cpp dma.cpp spu.cpp mdec.cpp \
+	cue_parser.cpp bin_reader.cpp iso9660.cpp exe_extractor.cpp virtual_fs.cpp cdrom_controller.cpp \
+	bios.cpp syscall_a.cpp syscall_b.cpp syscall_c.cpp heap.cpp event_system.cpp file_io.cpp \
+	psyq_hle.cpp psyq_registry.cpp psyq_libapi.cpp psyq_libcd.cpp psyq_libetc.cpp \
+	psyq_libgte.cpp psyq_libgpu.cpp psyq_font.cpp psyq_pad.cpp psyq_libc.cpp psyq_state.cpp
 
 ifneq ($(BUILD),$(notdir $(CURDIR)))
 export OUTPUT := $(CURDIR)/$(TARGET)
 export TOPDIR := $(CURDIR)
 export DEPSDIR := $(CURDIR)/$(BUILD)
 export LD := $(CXX)
-export VPATH := $(CURDIR)/source $(CURDIR)/../ps1Runtime/src $(CURDIR)/../ps1Runtime/src/input $(CURDIR)/../ps1Runtime/src/timers $(CURDIR)/../ps1Runtime/src/gpu $(CURDIR)/../ps1Runtime/src/dma
+export VPATH := $(CURDIR)/source \
+	$(CURDIR)/../ps1Runtime/src \
+	$(CURDIR)/../ps1Runtime/src/input \
+	$(CURDIR)/../ps1Runtime/src/timers \
+	$(CURDIR)/../ps1Runtime/src/gpu \
+	$(CURDIR)/../ps1Runtime/src/dma \
+	$(CURDIR)/../ps1Runtime/src/spu \
+	$(CURDIR)/../ps1Runtime/src/mdec \
+	$(CURDIR)/../ps1Runtime/src/cdrom \
+	$(CURDIR)/../ps1Runtime/src/bios \
+	$(CURDIR)/../ps1Runtime/src/psyq
 export OFILES := $(addsuffix .o,$(CPPFILES:.cpp=)) test_psx.o
 export INCLUDE := $(foreach dir,$(INCLUDES),-I$(CURDIR)/$(dir)) $(foreach dir,$(LIBDIRS),-I$(dir)/include)
 export LIBPATHS := $(foreach dir,$(LIBDIRS),-L$(dir)/lib)
