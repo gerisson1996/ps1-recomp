@@ -6,6 +6,7 @@
 #include "../../ps1Runtime/include/runtime/input/input.h"
 #include "../../ps1Runtime/include/runtime/timers/timers.h"
 #include "../../ps1Runtime/include/runtime/gpu/gpu.h"
+#include "renderer_switch.h"
 
 void recomp_init_dispatch_table();
 void recomp_dispatch(uint8_t* rdram, recomp_context* ctx, uint32_t addr);
@@ -62,6 +63,17 @@ int main(int argc, char **argv) {
         vram[19 * ps1::gpu::GPU::VRAM_WIDTH + 10].raw == 0 &&
         vram[20 * ps1::gpu::GPU::VRAM_WIDTH + 9].raw == 0;
 
+    // Make the software VRAM visible through a native libnx framebuffer.
+    // Draw a larger diagnostic rectangle so the first presentation test is
+    // unambiguous on the 1280x720 display.
+    gpu.writeGP0(0x020000FF);
+    gpu.writeGP0((60u << 16) | 80u);
+    gpu.writeGP0((100u << 16) | 160u);
+    gpu.snapshotDisplayBuffer();
+
+    ps1::gpu::RendererSwitch renderer(gpu);
+    const bool rendererPass = renderer.init();
+
     std::printf("PS1Recomp - Nintendo Switch\n");
     std::printf("ARM64/libnx bootstrap OK\n");
     std::printf("CPUContext size: %zu bytes\n", sizeof(ps1::CPUContext));
@@ -72,13 +84,18 @@ int main(int argc, char **argv) {
     std::printf("PS1 timer/IRQ core: %s\\n", timerPass ? "PASS" : "FAIL");
     std::printf("PS1 GPU GP0/VRAM core: %s\\n", gpuPass ? "PASS" : "FAIL");
     std::printf("PS1 controller backend: ACTIVE\\n");
+    std::printf("Switch framebuffer: %s\\n", rendererPass ? "ACTIVE" : "FAIL");
+    std::printf("A red rectangle should appear after this screen.\\n");
     std::printf("Press + to exit.\n");
 
     while (appletMainLoop()) {
         padUpdate(&pad);
         const u64 held = padGetButtons(&pad);
-        if (padGetButtonsDown(&pad) & HidNpadButton_Plus)
+        const u64 down = padGetButtonsDown(&pad);
+        if (down & HidNpadButton_Plus)
             break;
+        if (down & HidNpadButton_A)
+            renderer.renderFrame();
 
         // Reset active-low PS1 pad state, then map Switch controls.
         constexpr uint16_t all =
@@ -107,6 +124,7 @@ int main(int argc, char **argv) {
         if (held & HidNpadButton_Plus) input.press(ps1::input::BTN_START);
         consoleUpdate(nullptr);
     }
+    renderer.destroy();
     consoleExit(nullptr);
     return 0;
 }
