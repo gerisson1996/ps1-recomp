@@ -5,4 +5,9 @@ entry_point = "80010000"
 [[functions]]
 name = "switch_smoke"
 address = "80010000"
-size = 28
+size = 64
+
+[[functions]]
+name = "switch_smoke_helper"
+address = "80010040"
+size = 12
