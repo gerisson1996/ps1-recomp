@@ -1,6 +1,5 @@
 #include "runtime/input/input.h"
 #include "runtime/metrics.h"
-#include <fmt/format.h>
 
 namespace ps1::input {
 
