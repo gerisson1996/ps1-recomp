@@ -18,14 +18,14 @@ LIBS := -lnx
 LIBDIRS := $(PORTLIBS) $(LIBNX)
 
 # Milestone 2 links the recompiler ABI stub plus portable CPU/emuptr headers.
-CPPFILES := main.cpp recompiled_out_stub.cpp input.cpp timers.cpp
+CPPFILES := main.cpp recompiled_out_stub.cpp input.cpp timers.cpp gpu.cpp metrics.cpp
 
 ifneq ($(BUILD),$(notdir $(CURDIR)))
 export OUTPUT := $(CURDIR)/$(TARGET)
 export TOPDIR := $(CURDIR)
 export DEPSDIR := $(CURDIR)/$(BUILD)
 export LD := $(CXX)
-export VPATH := $(CURDIR)/source $(CURDIR)/../ps1Runtime/src $(CURDIR)/../ps1Runtime/src/input $(CURDIR)/../ps1Runtime/src/timers
+export VPATH := $(CURDIR)/source $(CURDIR)/../ps1Runtime/src $(CURDIR)/../ps1Runtime/src/input $(CURDIR)/../ps1Runtime/src/timers $(CURDIR)/../ps1Runtime/src/gpu
 export OFILES := $(addsuffix .o,$(CPPFILES:.cpp=))
 export INCLUDE := $(foreach dir,$(INCLUDES),-I$(CURDIR)/$(dir)) $(foreach dir,$(LIBDIRS),-I$(dir)/include)
 export LIBPATHS := $(foreach dir,$(LIBDIRS),-L$(dir)/lib)
