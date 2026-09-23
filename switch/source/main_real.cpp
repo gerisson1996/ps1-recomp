@@ -322,10 +322,15 @@ int main(int, char **) {
     } else if ((frame % 60) == 0) {
       uint32_t dx = 0, dy = 0;
       gpu.getDisplayArea(dx, dy);
+      const uint32_t cdSmState = memory.read32(0x80059704u);
+      const uint8_t cdResp0 = memory.read8(0x800596FCu);
+      const uint8_t cdResp1 = memory.read8(0x800596FDu);
+      auto &psyqDbg = ps1::psyq::psyq_state();
       std::printf(
           "[REAL] vsync=%u site=%08X RA=%08X SP=%08X GP=%08X\n"
           "       GPUSTAT=%08X DISP=%u,%u mode=%s\n"
-          "       CD state=%u IF=%u ready=%u mode=%02X disc=%s\n",
+          "       CD hw=%u IF=%u sector=%u mode=%02X disc=%s\n"
+          "       CD sm=%u resp=%02X,%02X hleSync=%u hleReady=%u\n",
           frame, ps1LastIndirectSite(), ctx.r[ps1::RA], ctx.r[ps1::SP],
           ctx.r[ps1::GP], gpu.readGPUSTAT(), dx, dy,
           gpu.isDisplayModeSet() ? "SET" : "DEFAULT",
@@ -333,7 +338,10 @@ int main(int, char **) {
           static_cast<unsigned>(cdrom.interruptFlag()),
           cdrom.hasSectorReady() ? 1u : 0u,
           static_cast<unsigned>(cdrom.getMode()),
-          mountedDisc ? "YES" : "NO");
+          mountedDisc ? "YES" : "NO",
+          cdSmState, cdResp0, cdResp1,
+          static_cast<unsigned>(psyqDbg.cdSyncByte.load(std::memory_order_acquire)),
+          static_cast<unsigned>(psyqDbg.cdReadyByte.load(std::memory_order_acquire)));
       consoleUpdate(nullptr);
     }
   };
