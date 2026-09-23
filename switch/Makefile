@@ -56,7 +56,7 @@ export VPATH := $(CURDIR)/source \
 export OFILES := $(addsuffix .o,$(CPPFILES:.cpp=)) $(EXTRA_OFILES)
 export INCLUDE := $(foreach dir,$(INCLUDES),-I$(CURDIR)/$(dir)) $(foreach dir,$(LIBDIRS),-I$(dir)/include)
 export LIBPATHS := $(foreach dir,$(LIBDIRS),-L$(dir)/lib)
-.PHONY: all clean
+.PHONY: all clean $(BUILD)
 all: $(BUILD)
 $(BUILD):
 	@[ -d $@ ] || mkdir -p $@
