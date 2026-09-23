@@ -2,6 +2,12 @@
 
 namespace ps1recomp {
 
+#ifndef __SWITCH__
+#define PS1_FMT_PRINT(...) fmt::print(__VA_ARGS__)
+#else
+#define PS1_FMT_PRINT(...) std::printf(__VA_ARGS__)
+#endif
+
 std::string emitDispatchBody() {
   return R"CPP(void recomp_dispatch(uint8_t* rdram, recomp_context* ctx, uint32_t addr) {
     // Lazy-init on first call
@@ -12,7 +18,7 @@ std::string emitDispatchBody() {
         static bool nullDispatchWarned = false;
         if (!nullDispatchWarned) {
             nullDispatchWarned = true;
-            fmt::print("[DISPATCH] null addr suppressed (startup transient, RA=0x{:08X})\n", ctx->r[31]);
+            PS1_FMT_PRINT("[DISPATCH] null addr suppressed (startup transient, RA=0x{:08X})\n", ctx->r[31]);
         }
         return;
     }
@@ -82,7 +88,7 @@ std::string emitDispatchBody() {
         // to the wrong function.  The host stack always names the emitted
         // function that issued the dispatch; resolve it with
         //   addr2line -f -C -e build/ps1Runtime/ps1Runtime <offset>
-        fmt::print(stderr,
+        PS1_FMT_PRINT(stderr,
                    "[DISPATCH] FATAL: unmapped call to 0x{:08X} (phys=0x{:08X})\n"
                    "           issued from guest site 0x{:08X}; RA=0x{:08X}\n"
                    "           This address was never emitted by the recompiler.\n"
@@ -100,10 +106,10 @@ std::string emitDispatchBody() {
     static std::unordered_map<uint32_t, uint32_t> s_unknownHits;
     auto& hitCount = s_unknownHits[addr];
     if (hitCount < 5) {
-        fmt::print(stderr, "[DISPATCH] Unknown target: 0x{:08X} (RA=0x{:08X}, phys=0x{:08X})\n",
+        PS1_FMT_PRINT(stderr, "[DISPATCH] Unknown target: 0x{:08X} (RA=0x{:08X}, phys=0x{:08X})\n",
                    addr, ctx->r[31], phys);
     } else if (hitCount == 5) {
-        fmt::print(stderr, "[DISPATCH] Unknown target: 0x{:08X} -- suppressing further logs\n", addr);
+        PS1_FMT_PRINT(stderr, "[DISPATCH] Unknown target: 0x{:08X} -- suppressing further logs\n", addr);
     }
     hitCount++;
 }
