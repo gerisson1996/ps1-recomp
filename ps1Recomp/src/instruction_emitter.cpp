@@ -791,34 +791,50 @@ std::string InstructionEmitter::emitFunction(const RecompFunction &func) const {
     std::set<uint32_t> referenced;
     std::set<uint32_t> defined;
 
-    // Find all "goto L_" references
+    // Only numeric labels are control-flow addresses. Helper labels such as
+    // L_dsdone_8002A420 deliberately share the L_ prefix; std::stoul("dsdone_8",
+    // 16) accepts the leading 'd' and returns 13, which used to manufacture a
+    // bogus fallback dispatch to 0x0000000D in otherwise valid functions.
+    auto parseHexLabel = [&](size_t pos, uint32_t &addr) {
+      if (pos + 8 > result.size())
+        return false;
+      for (size_t k = 0; k < 8; ++k) {
+        const char ch = result[pos + k];
+        const bool hex = (ch >= '0' && ch <= '9') ||
+                         (ch >= 'a' && ch <= 'f') ||
+                         (ch >= 'A' && ch <= 'F');
+        if (!hex)
+          return false;
+      }
+      try {
+        addr = static_cast<uint32_t>(
+            std::stoul(result.substr(pos, 8), nullptr, 16));
+        return true;
+      } catch (...) {
+        return false;
+      }
+    };
+
+    // Find all "goto L_XXXXXXXX" numeric references.
     size_t pos = 0;
     while ((pos = result.find("goto L_", pos)) != std::string::npos) {
       pos += 7; // skip "goto L_"
-      if (pos + 8 <= result.size()) {
-        try {
-          uint32_t addr = std::stoul(result.substr(pos, 8), nullptr, 16);
-          referenced.insert(addr);
-        } catch (...) {
-        }
-      }
+      uint32_t addr = 0;
+      if (parseHexLabel(pos, addr))
+        referenced.insert(addr);
       pos += 8;
     }
 
-    // Find all "L_XXXXXXXX:" label definitions
+    // Find all "L_XXXXXXXX:" numeric label definitions.
     pos = 0;
     while ((pos = result.find("L_", pos)) != std::string::npos) {
       size_t lpos = pos;
       pos += 2; // skip "L_"
-      if (pos + 8 <= result.size() && pos + 8 < result.size() &&
-          result[pos + 8] == ':') {
-        // Check this isn't preceded by "goto " (i.e., it's a label def)
+      if (pos + 8 < result.size() && result[pos + 8] == ':') {
         if (lpos == 0 || result[lpos - 1] == '\n' || result[lpos - 1] == ' ') {
-          try {
-            uint32_t addr = std::stoul(result.substr(pos, 8), nullptr, 16);
+          uint32_t addr = 0;
+          if (parseHexLabel(pos, addr))
             defined.insert(addr);
-          } catch (...) {
-          }
         }
       }
     }
