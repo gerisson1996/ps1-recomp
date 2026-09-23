@@ -26,7 +26,10 @@ add_subdirectory(third_party/fmt)
 # Project components
 add_subdirectory(ps1Analyzer)
 add_subdirectory(ps1Recomp)
-add_subdirectory(ps1Runtime)
+option(PS1RECOMP_BUILD_RUNTIME "Build ps1Runtime" ON)
+if(PS1RECOMP_BUILD_RUNTIME)
+    add_subdirectory(ps1Runtime)
+endif()
 
 # GUI Studio (optional, disabled by default — requires SDL2 + OpenGL)
 option(PS1RECOMP_BUILD_INTERFACE "Build ps1Interface GUI studio" OFF)
