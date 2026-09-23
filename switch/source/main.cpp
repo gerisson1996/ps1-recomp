@@ -164,8 +164,13 @@ int main(int argc, char **argv) {
         recompCtx.r[ps1::T0] == 40u &&
         recompCtx.r[ps1::T1] == 2u &&
         recompCtx.r[ps1::T2] == 0x12345678u &&
+        recompCtx.r[ps1::T4] == 0x12345678u &&
+        recompCtx.r[ps1::T5] == 7u &&
+        recompCtx.r[ps1::T6] == 9u &&
+        recompCtx.r[ps1::V0] == 43u &&
+        memory.read32(0x80002000u) == 0x12345678u &&
         recompCtx.r[ps1::ZERO] == 0u;
-    std::printf("MIPS recomp/dispatch smoke: %s\n", recompPass ? "PASS" : "FAIL");
+    std::printf("MIPS recomp LW/SW/branch/JAL: %s\n", recompPass ? "PASS" : "FAIL");
     std::printf("PS1 timer/IRQ core: %s\n", timerPass ? "PASS" : "FAIL");
     std::printf("PS1 GPU GP0/VRAM core: %s\n", gpuPass ? "PASS" : "FAIL");
     std::printf("PS1 RAM/DMA2/GPU path: %s\n", dmaGpuPass ? "PASS" : "FAIL");
