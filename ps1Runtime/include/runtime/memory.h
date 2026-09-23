@@ -175,6 +175,7 @@ public:
     }
 
     // MDEC (32-bit)
+#ifndef PS1_SWITCH_GPU_DMA_TEST
     if (phys == 0x1F801820) {
       if (mdec_)
         return mdec_->readData();
@@ -185,6 +186,7 @@ public:
         return mdec_->readStatus();
       return 0;
     }
+#endif
 
     // Input SIO (32-bit reads)
     if (phys >= 0x1F801040 && phys < 0x1F801050) {
@@ -193,6 +195,7 @@ public:
       return 0;
     }
 
+#ifndef PS1_SWITCH_GPU_DMA_TEST
     // CD-ROM (8-bit mapped, return byte in low bits)
     if (phys >= 0x1F801800 && phys < 0x1F801804) {
       if (cdrom_)
@@ -206,6 +209,7 @@ public:
       uint16_t hi = spu_ ? spu_->readRegister(phys + 2) : 0;
       return lo | (static_cast<uint32_t>(hi) << 16);
     }
+#endif
 
     // Memory Control / Expansion
     if (phys >= 0x1F801000 && phys < 0x1F801040) {
@@ -340,6 +344,7 @@ public:
     }
 
     // MDEC (32-bit)
+#ifndef PS1_SWITCH_GPU_DMA_TEST
     if (phys == 0x1F801820) {
       if (mdec_)
         mdec_->writeCommand(val);
@@ -350,6 +355,7 @@ public:
         mdec_->writeControl(val);
       return;
     }
+#endif
 
     // Input SIO (32-bit writes)
     if (phys >= 0x1F801040 && phys < 0x1F801050) {
@@ -358,6 +364,7 @@ public:
       return;
     }
 
+#ifndef PS1_SWITCH_GPU_DMA_TEST
     // CD-ROM (byte writes via 32-bit)
     if (phys >= 0x1F801800 && phys < 0x1F801804) {
       if (cdrom_)
@@ -373,6 +380,7 @@ public:
       }
       return;
     }
+#endif
 
     // Memory Control (stub)
     if (phys >= 0x1F801000 && phys < 0x1F801040) {
