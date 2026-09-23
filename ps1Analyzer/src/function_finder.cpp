@@ -4,6 +4,7 @@
 #include "ps1recomp/function_finder.h"
 
 #include <algorithm>
+#include <unordered_map>
 #include <fmt/format.h>
 
 namespace ps1recomp {
@@ -268,8 +269,12 @@ void FunctionFinder::scanJALTargets(const Section& text) {
     // zero/data tail from making this pass walk the rest of a multi-megabyte
     // executable for every candidate.
     constexpr uint32_t kJalValidationBytes = 0x10000;
+    std::unordered_map<uint32_t, bool> jalTargetValidationCache;
 
     auto targetLooksLikeFunction = [&](uint32_t target) {
+        auto cached = jalTargetValidationCache.find(target);
+        if (cached != jalTargetValidationCache.end())
+            return cached->second;
         if (!text.containsAddress(target) || target < text.vaddr)
             return false;
 
@@ -284,7 +289,14 @@ void FunctionFinder::scanJALTargets(const Section& text) {
         for (uint32_t addr = target; addr + 4 <= hardEnd; addr += 4)
             candidate.push_back(readInstruction(text, addr - text.vaddr));
 
-        return validatesAsFunction(candidate, target, hardEnd);
+        const bool valid = validatesAsFunction(candidate, target, hardEnd);
+        jalTargetValidationCache[target] = valid;
+        return valid;
+    };
+
+    auto isDirectJump = [](uint32_t word) {
+        const uint32_t op = mips::getOpcode(word);
+        return op == mips::OP_J || op == mips::OP_JAL;
     };
 
     for (uint32_t i = 0; i < numInstructions; ++i) {
@@ -292,6 +304,19 @@ void FunctionFinder::scanJALTargets(const Section& text) {
         uint32_t pc = text.vaddr + (i * 4);
 
         if (mips::isJAL(instr)) {
+            // A direct jump/call cannot legally occupy another direct
+            // jump/call's delay slot. Long runs of words with opcodes 0x02/0x03
+            // are therefore data tables, not executable MIPS. Real KERNEL.BIN
+            // contains exactly this shape and otherwise produces hundreds of
+            // fake JAL targets.
+            const bool prevDirect =
+                i > 0 && isDirectJump(readInstruction(text, (i - 1) * 4));
+            const bool nextDirect =
+                i + 1 < numInstructions &&
+                isDirectJump(readInstruction(text, (i + 1) * 4));
+            if (prevDirect || nextDirect)
+                continue;
+
             uint32_t target = mips::jalTarget(pc, instr);
 
             if (text.containsAddress(target) && targetLooksLikeFunction(target)) {
