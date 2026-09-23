@@ -1,0 +1,8 @@
+[binary]
+path = "switch/testdata/minimal.psx.exe"
+entry_point = "80010000"
+
+[[functions]]
+name = "switch_smoke"
+address = "80010000"
+size = 28
