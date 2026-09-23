@@ -7,7 +7,7 @@ include $(DEVKITPRO)/libnx/switch_rules
 TARGET := ps1recomp_switch
 BUILD := build
 SOURCES := source ../ps1Runtime/src
-INCLUDES := include ../ps1Runtime/include source
+INCLUDES := include ../ps1Runtime/include ../third_party/fmt/include source
 ARCH := -march=armv8-a+crc+crypto -mtune=cortex-a57 -mtp=soft -fPIE
 CFLAGS := -g -Wall -O2 -ffunction-sections $(ARCH) $(DEFINES)
 CFLAGS += $(INCLUDE) -D__SWITCH__ -DPS1_SWITCH_GPU_DMA_TEST
