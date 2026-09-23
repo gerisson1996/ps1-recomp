@@ -6,6 +6,8 @@
 #include "../../ps1Runtime/include/runtime/input/input.h"
 #include "../../ps1Runtime/include/runtime/timers/timers.h"
 #include "../../ps1Runtime/include/runtime/gpu/gpu.h"
+#include "../../ps1Runtime/include/runtime/dma/dma.h"
+#include "../../ps1Runtime/include/runtime/memory.h"
 #include "renderer_switch.h"
 
 void recomp_init_dispatch_table();
@@ -52,6 +54,34 @@ int main(int argc, char **argv) {
 
     // Reuse the upstream GP0 FillRect test semantics on the actual ARM64 build.
     ps1::gpu::GPU gpu;
+
+    // Validate the real Memory <-> DMA <-> GPU path. Keep other DMA devices
+    // detached: this test exercises only channel 2 (GPU).
+    ps1::Memory memory;
+    ps1::DMA dma;
+    memory.setGPU(&gpu);
+    memory.setDMA(&dma);
+    dma.setMemory(&memory);
+    dma.setGPU(&gpu);
+
+    // Three GP0 words in guest RAM: FillRect(red), position, size.
+    constexpr uint32_t dmaCmd = 0x00010000;
+    memory.write32(dmaCmd + 0, 0x020000FF);
+    memory.write32(dmaCmd + 4, (100u << 16) | 200u);
+    memory.write32(dmaCmd + 8, (40u << 16) | 60u);
+
+    // DMA2 registers: MADR, BCR=3 words, CHCR manual/from-RAM/start/trigger.
+    memory.write32(0x1F8010A0, dmaCmd);
+    memory.write32(0x1F8010A4, 3);
+    memory.write32(0x1F8010A8, (1u << 0) | (1u << 24) | (1u << 28));
+
+    const auto *dmaVram = gpu.getVRAM();
+    const uint16_t dmaExpectedRed = 255 >> 3;
+    const bool dmaGpuPass =
+        dmaVram[100 * ps1::gpu::GPU::VRAM_WIDTH + 200].raw == dmaExpectedRed &&
+        dmaVram[139 * ps1::gpu::GPU::VRAM_WIDTH + 259].raw == dmaExpectedRed &&
+        (memory.read32(0x1F8010A8) & ((1u << 24) | (1u << 28))) == 0;
+
     gpu.writeGP0(0x020000FF); // red
     gpu.writeGP0(0x0014000A); // x=10, y=20
     gpu.writeGP0(0x00050005); // 5x5
@@ -82,6 +112,7 @@ int main(int argc, char **argv) {
     std::printf("recompiled_out stub linked: PASS\\n");
     std::printf("PS1 timer/IRQ core: %s\\n", timerPass ? "PASS" : "FAIL");
     std::printf("PS1 GPU GP0/VRAM core: %s\\n", gpuPass ? "PASS" : "FAIL");
+    std::printf("PS1 Memory/DMA2/GPU path: %s\\n", dmaGpuPass ? "PASS" : "FAIL");
     std::printf("PS1 controller backend: ACTIVE\\n");
     std::printf("Switch framebuffer: READY\\n");
     std::printf("A red rectangle should appear after this screen.\\n");
