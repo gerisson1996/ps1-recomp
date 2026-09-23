@@ -4,6 +4,7 @@
 #include "../../ps1Runtime/include/runtime/cpu_context.h"
 #include "../../ps1Runtime/include/runtime/emuptr.h"
 #include "../../ps1Runtime/include/runtime/input/input.h"
+#include "../../ps1Runtime/include/runtime/timers/timers.h"
 
 void recomp_init_dispatch_table();
 void recomp_dispatch(uint8_t* rdram, recomp_context* ctx, uint32_t addr);
@@ -33,6 +34,19 @@ int main(int argc, char **argv) {
 
     ps1::input::InputController input;
     input.setPadType(0, ps1::input::PadType::Digital);
+
+    // Deterministic timer/IRQ self-test: target at 4 cycles, reset on target,
+    // IRQ on target. This validates the portable PS1 timing core on ARM64.
+    ps1::Timers timers;
+    ps1::InterruptController irq;
+    timers.writeRegister(0x1F801108, 4);
+    timers.writeRegister(0x1F801104, (1u << 3) | (1u << 4));
+    const uint32_t timerIrqs = timers.tick(4);
+    if (timerIrqs)
+        irq.raiseInterrupt(timerIrqs);
+    irq.writeIMask(ps1::IRQ_TMR0);
+    const bool timerPass =
+        (timerIrqs & ps1::IRQ_TMR0) != 0 && irq.hasPendingInterrupt();
 
     std::printf("PS1Recomp - Nintendo Switch\n");
     std::printf("ARM64/libnx bootstrap OK\n");
