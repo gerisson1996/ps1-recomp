@@ -15,6 +15,16 @@
 #include <string>
 #include <vector>
 
+static bool hasPsxExeMagic(const std::string &path) {
+  FILE *fp = fopen(path.c_str(), "rb");
+  if (!fp)
+    return false;
+  char magic[8] = {};
+  const size_t n = fread(magic, 1, sizeof(magic), fp);
+  fclose(fp);
+  return n == sizeof(magic) && std::memcmp(magic, "PS-X EXE", 8) == 0;
+}
+
 static bool endsWith(const std::string &str, const std::string &suffix) {
   if (suffix.size() > str.size())
     return false;
@@ -102,11 +112,18 @@ int main(int argc, char *argv[]) {
     }
   }
 
-  // Auto-detect BIN disc images
+  // Auto-detect BIN disc images. Some games name their bootable PS-X EXE
+  // payloads *.BIN (for example KERNEL.BIN), so inspect the file magic before
+  // assuming every .bin is a raw CD image.
   std::vector<uint8_t>
       extractedExe; // keeps data alive when extracted from disc
 
-  if (endsWith(input_path, ".bin")) {
+  const bool inputIsPsxExe = hasPsxExeMagic(input_path);
+  if (inputIsPsxExe && endsWith(input_path, ".bin")) {
+    fmt::print("Detected PS-X EXE payload with .BIN filename: {}\n", input_path);
+  }
+
+  if (endsWith(input_path, ".bin") && !inputIsPsxExe) {
     fmt::print("Detected BIN disc image: {}\n", input_path);
 
     ps1recomp::DiscReader disc;
