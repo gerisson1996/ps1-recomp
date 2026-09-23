@@ -30,6 +30,8 @@ jobs:
           path: |
             build-host/ps1Analyzer/ps1Analyzer
             build-host/ps1Recomp/ps1Recomp
+            ps1Analyzer/data/psyq_signatures.toml
+            ps1Analyzer/data/psyq_metadata.toml
 
       - name: Generate minimal PS-X EXE
         run: python3 switch/testdata/make_minimal_psxexe.py
