@@ -62,11 +62,13 @@ void RendererSwitch::renderFrame() {
   const uint32_t offX = (1280 - outW) / 2;
   const uint32_t offY = (720 - outH) / 2;
 
-  std::fill(dst, dst + static_cast<size_t>(stride) * 720, 0xFF000000u);
+  // libnx returns stride in BYTES, not pixels.
+  const size_t stridePixels = stride / sizeof(uint32_t);
+  std::fill(dst, dst + stridePixels * 720, 0xFF000000u);
 
   for (uint32_t y = 0; y < outH; ++y) {
     const uint32_t sy = srcY + y / scale;
-    auto *row = dst + static_cast<size_t>(offY + y) * stride + offX;
+    auto *row = dst + static_cast<size_t>(offY + y) * stridePixels + offX;
     for (uint32_t x = 0; x < outW; ++x) {
       const uint16_t p = vram[sy * GPU::VRAM_WIDTH + srcX + x / scale].raw;
       const uint8_t r = static_cast<uint8_t>((p & 0x1F) * 255 / 31);
