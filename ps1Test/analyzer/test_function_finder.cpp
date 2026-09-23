@@ -281,6 +281,48 @@ TEST(FunctionFinder, LinearSweepKeepsValidatedExtentInsteadOfTrailingData) {
     cleanupFile(path);
 }
 
+TEST(FunctionFinder, RejectsConsecutiveDirectJumpDataEvenWhenTargetIsCode) {
+    const std::string path = "/tmp/ps1recomp_test_ff_jal_jump_table.elf";
+
+    // Real entry function at +0x00.
+    std::vector<uint32_t> code(32, 0xFFFFFFFFu);
+    code[0] = makeNOP();
+    code[1] = makeJR_RA();
+    code[2] = makeNOP();
+
+    // A data table at +0x10 whose words happen to decode as direct J/JAL.
+    // The middle JAL points at a genuinely valid function. Target validation
+    // alone therefore cannot reject it; the source context has to reveal that
+    // the JAL itself sits in a branch-delay-slot-shaped data run.
+    const uint32_t base = 0x80010000u;
+    const uint32_t target = 0x80010040u;
+    code[4] = (mips::OP_J << 26) | ((0x80010100u >> 2) & 0x03FFFFFFu);
+    code[5] = makeJAL(base + 0x14, target);
+    code[6] = (mips::OP_J << 26) | ((0x80010120u >> 2) & 0x03FFFFFFu);
+
+    // Valid function at +0x40, independently discoverable by its prologue.
+    code[16] = makeADDIU_SP(-16);
+    code[17] = makeNOP();
+    code[18] = makeJR_RA();
+    code[19] = makeADDIU_SP(16);
+
+    createElfWithCode(path, code);
+
+    ElfParser elf;
+    ASSERT_TRUE(elf.load(path));
+
+    FunctionFinder finder;
+    finder.findFunctions(elf);
+
+    EXPECT_EQ(finder.getJALTargets().count(target), 0u)
+        << "JAL-shaped data in a direct-jump table must not become a call edge";
+    auto* fn = finder.findByAddress(target);
+    ASSERT_NE(fn, nullptr);
+    EXPECT_NE(fn->source, FunctionSource::JALTarget);
+
+    cleanupFile(path);
+}
+
 TEST(FunctionFinder, RejectsJALLookingDataWhoseTargetIsNotCode) {
     const std::string path = "/tmp/ps1recomp_test_ff_jal_data.elf";
 
