@@ -1,0 +1,14 @@
+{
+  "name": "ps1Recomp Nintendo Switch",
+  "image": "devkitpro/devkita64:latest",
+  "containerEnv": {
+    "DEVKITPRO": "/opt/devkitpro",
+    "DEVKITA64": "/opt/devkitpro/devkitA64"
+  },
+  "postCreateCommand": "git submodule update --init --recursive",
+  "customizations": {
+    "vscode": {
+      "extensions": []
+    }
+  }
+}
