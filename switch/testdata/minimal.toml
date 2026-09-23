@@ -16,3 +16,8 @@ size = 12
 name = "switch_mmio_gpu_smoke"
 address = "8001004C"
 size = 52
+
+[[functions]]
+name = "switch_mmio_dma2_smoke"
+address = "80010080"
+size = 84
