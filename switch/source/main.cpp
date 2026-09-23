@@ -57,8 +57,11 @@ int main(int argc, char **argv) {
 
     // Validate the real Memory <-> DMA <-> GPU path. Keep other DMA devices
     // detached: this test exercises only channel 2 (GPU).
-    ps1::Memory memory;
-    ps1::DMA dma;
+    // These runtime objects are large (Memory contains PS1 RAM/BIOS and GPU owns
+    // the full VRAM buffers). Keep them off Horizon's comparatively small
+    // application stack.
+    static ps1::Memory memory;
+    static ps1::DMA dma;
     memory.setGPU(&gpu);
     memory.setDMA(&dma);
     dma.setMemory(&memory);
