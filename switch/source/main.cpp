@@ -10,6 +10,13 @@
 #include "../../ps1Runtime/include/runtime/dma/dma.h"
 #include "../../ps1Runtime/include/runtime/memory.h"
 #include "../../ps1Runtime/include/runtime/cpu_context.h"
+#include "../../ps1Runtime/include/runtime/spu/spu.h"
+#include "../../ps1Runtime/include/runtime/mdec/mdec.h"
+#include "../../ps1Runtime/include/runtime/cdrom/virtual_fs.h"
+#include "../../ps1Runtime/include/runtime/cdrom/cdrom_controller.h"
+#include "../../ps1Runtime/include/runtime/bios/bios.h"
+#include "../../ps1Runtime/include/runtime/psyq/psyq_hle.h"
+#include "../../ps1Runtime/include/runtime/psyq/psyq_registry.h"
 
 void recomp_init_dispatch_table();
 void recomp_dispatch(uint8_t*, recomp_context*, uint32_t);
@@ -98,10 +105,71 @@ int main(int argc, char **argv) {
     // application stack.
     static ps1::Memory memory;
     static ps1::DMA dma;
+    static ps1::spu::SPU spu;
+    static ps1::mdec::MDEC mdec;
+    static ps1::cdrom::CdromController cdrom;
+    static ps1::cdrom::VirtualFs vfs;
+
     memory.setGPU(&gpu);
     memory.setDMA(&dma);
+    memory.setSPU(&spu);
+    memory.setMDEC(&mdec);
+    memory.setCDROM(&cdrom);
+    memory.setInput(&input);
+    memory.setTimers(&timers);
+    memory.setInterruptController(&irq);
+
     dma.setMemory(&memory);
     dma.setGPU(&gpu);
+    dma.setSPU(&spu);
+    dma.setMDEC(&mdec);
+    dma.setCDROM(&cdrom);
+    cdrom.attachVirtualFs(&vfs);
+    cdrom.setXaCallback([&spu](const int16_t *samples, uint32_t count) {
+        spu.pushXaSamples(samples, count);
+    });
+
+    // From this point HLE/BIOS emuptr accesses must resolve against the same
+    // RAM object used by Memory and the recompiled code.
+    ps1::emuptr_set_ram(memory.ramPtr());
+
+    // Wire the portable BIOS + PsyQ HLE stack exactly as the host runtime does.
+    // No disc image is required for this smoke: the goal is to prove that the
+    // real-game runtime path links and dispatches correctly on Horizon/libnx.
+    recomp_context fullRuntimeCtx{};
+    fullRuntimeCtx.reset();
+    fullRuntimeCtx.mem = &memory;
+    fullRuntimeCtx.r[ps1::SP] = 0x801FFFF0u;
+    ps1::bios::Bios bios(fullRuntimeCtx, vfs, memory);
+    fullRuntimeCtx.bios = &bios;
+    bios.setGPU(&gpu);
+    bios.setInputController(&input);
+    bios.setCdromController(&cdrom);
+    bios.setDma(&dma);
+    cdrom.setInterruptCallback(
+        [&bios](uint8_t intType) { bios.queueCdromEvent(intType); });
+
+    ps1::psyq::HleConfig hleCfg;
+    hleCfg.drainCallbacks = [&bios]() { bios.drainPendingCallbacks(); };
+    hleCfg.writeGP0 = [&gpu](uint32_t word) { gpu.writeGP0(word); };
+    hleCfg.writeGP1 = [&gpu](uint32_t word) { gpu.writeGP1(word); };
+    hleCfg.deliverVBlankEvent = [&bios]() { bios.triggerVBlankEvent(); };
+    ps1::psyq::configure(hleCfg);
+    psyq_registry_init_defaults();
+    psyq_register_rayman_boot();
+
+    // Exercise the generated dispatcher's BIOS A0 path with rand(). The BIOS
+    // seed starts at 1, so the first PS1-style rand() result is deterministic.
+    fullRuntimeCtx.r[ps1::T1] = 0x2Fu;
+    recomp_dispatch(memory.ramPtr(), &fullRuntimeCtx, 0x000000A0u);
+    const bool biosDispatchPass = fullRuntimeCtx.r[ps1::V0] == 16838u;
+
+    // Exercise the name-keyed PsyQ registry through an implementation used by
+    // real games. DrawSync is synchronous in this runtime and returns 0.
+    fullRuntimeCtx.r[ps1::A0] = 0;
+    fullRuntimeCtx.r[ps1::V0] = 0xFFFFFFFFu;
+    psyq_dispatch("libgpu_DrawSync", &fullRuntimeCtx);
+    const bool psyqRegistryPass = fullRuntimeCtx.r[ps1::V0] == 0u;
 
     // DMA reset value 0x07654321 leaves channel 2's enable bit (DPCR bit 11)
     // clear. Enable GPU DMA explicitly, as the PS1 BIOS normally does.
@@ -262,6 +330,9 @@ int main(int argc, char **argv) {
     std::printf("MIPS recomp -> GPU GP0 MMIO: %s\\n", recompGpuMmioPass ? "PASS" : "FAIL");
     std::printf("MIPS recomp -> DMA2 -> GPU: %s\\n", recompDmaMmioPass ? "PASS" : "FAIL");
     std::printf("MIPS recomp -> GTE NCLIP: %s\\n", recompGtePass ? "PASS" : "FAIL");
+    std::printf("PS1 BIOS A0 dispatch: %s\\n", biosDispatchPass ? "PASS" : "FAIL");
+    std::printf("PsyQ HLE registry: %s\\n", psyqRegistryPass ? "PASS" : "FAIL");
+    std::printf("PS1 full device runtime: LINKED\\n");
     std::printf("PS1 timer/IRQ core: %s\n", timerPass ? "PASS" : "FAIL");
     std::printf("PS1 GPU GP0/VRAM core: %s\n", gpuPass ? "PASS" : "FAIL");
     std::printf("PS1 RAM/DMA2/GPU path: %s\n", dmaGpuPass ? "PASS" : "FAIL");
