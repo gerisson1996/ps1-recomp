@@ -5,6 +5,7 @@
 #include "../../ps1Runtime/include/runtime/emuptr.h"
 #include "../../ps1Runtime/include/runtime/input/input.h"
 #include "../../ps1Runtime/include/runtime/timers/timers.h"
+#include "../../ps1Runtime/include/runtime/gpu/gpu.h"
 
 void recomp_init_dispatch_table();
 void recomp_dispatch(uint8_t* rdram, recomp_context* ctx, uint32_t addr);
@@ -48,13 +49,29 @@ int main(int argc, char **argv) {
     const bool timerPass =
         (timerIrqs & ps1::IRQ_TMR0) != 0 && irq.hasPendingInterrupt();
 
+    // Reuse the upstream GP0 FillRect test semantics on the actual ARM64 build.
+    ps1::gpu::GPU gpu;
+    gpu.writeGP0(0x020000FF); // red
+    gpu.writeGP0(0x0014000A); // x=10, y=20
+    gpu.writeGP0(0x00050005); // 5x5
+    const auto *vram = gpu.getVRAM();
+    const uint16_t expectedRed = 255 >> 3;
+    const bool gpuPass =
+        vram[20 * ps1::gpu::GPU::VRAM_WIDTH + 10].raw == expectedRed &&
+        vram[24 * ps1::gpu::GPU::VRAM_WIDTH + 14].raw == expectedRed &&
+        vram[19 * ps1::gpu::GPU::VRAM_WIDTH + 10].raw == 0 &&
+        vram[20 * ps1::gpu::GPU::VRAM_WIDTH + 9].raw == 0;
+
     std::printf("PS1Recomp - Nintendo Switch\n");
     std::printf("ARM64/libnx bootstrap OK\n");
     std::printf("CPUContext size: %zu bytes\n", sizeof(ps1::CPUContext));
     std::printf("PS1 RAM: %zu bytes\n", sizeof(g_ps1_ram));
     std::printf("RAM mirror test: %s\n\n",
                 *word == 0x50533153 ? "PASS" : "FAIL");
-    std::printf("recompiled_out stub linked: PASS\n");
+    std::printf("recompiled_out stub linked: PASS\\n");
+    std::printf("PS1 timer/IRQ core: %s\\n", timerPass ? "PASS" : "FAIL");
+    std::printf("PS1 GPU GP0/VRAM core: %s\\n", gpuPass ? "PASS" : "FAIL");
+    std::printf("PS1 controller backend: ACTIVE\\n");
     std::printf("Press + to exit.\n");
 
     while (appletMainLoop()) {
