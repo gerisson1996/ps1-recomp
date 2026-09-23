@@ -62,6 +62,22 @@ words = [
     0xADB80008, # sw    t8, 8(t5) CHCR; transfer executes synchronously
     0x03E00008, # jr    ra
     0x00000000, # nop
+
+    # GTE smoke: load three screen-space points, run NCLIP, read MAC0.
+    # Triangle (10,20), (30,20), (10,40) has signed area/NCLIP = 400.
+    0x3C080014, # lui   t0, 0x0014
+    0x3508000A, # ori   t0, t0, 0x000A => SXY0=(10,20)
+    0x3C090014, # lui   t1, 0x0014
+    0x3529001E, # ori   t1, t1, 0x001E => SXY1=(30,20)
+    0x3C0A0028, # lui   t2, 0x0028
+    0x354A000A, # ori   t2, t2, 0x000A => SXY2=(10,40)
+    0x48886000, # mtc2  t0, SXY0 (cop2d[12])
+    0x48896800, # mtc2  t1, SXY1 (cop2d[13])
+    0x488A7000, # mtc2  t2, SXY2 (cop2d[14])
+    0x4A000006, # nclip
+    0x4802C000, # mfc2  v0, MAC0 (cop2d[24])
+    0x03E00008, # jr    ra
+    0x00000000, # nop
 ]
 header = bytearray(0x800)
 header[0:8] = b"PS-X EXE"
