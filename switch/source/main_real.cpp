@@ -199,20 +199,26 @@ int main(int, char **) {
   });
 
   const char *mountedDisc = nullptr;
+  long mountedDiscBytes = 0;
   for (const char *candidate : kDiscCandidates) {
     FILE *f = std::fopen(candidate, "rb");
     if (!f)
       continue;
+    if (std::fseek(f, 0, SEEK_END) == 0)
+      mountedDiscBytes = std::ftell(f);
     std::fclose(f);
     if (vfs.loadDisc(candidate)) {
       mountedDisc = candidate;
       break;
     }
   }
-  if (mountedDisc)
+  if (mountedDisc) {
     std::printf("DISC: mounted %s\n", mountedDisc);
-  else
+    std::printf("DISC: bytes=%ld raw2352_rem=%ld\n", mountedDiscBytes,
+                mountedDiscBytes > 0 ? (mountedDiscBytes % 2352) : -1L);
+  } else {
     std::printf("DISC: not found (boot continues; CD reads may stop later)\n");
+  }
 
   recomp_context ctx{};
   ctx.reset();
@@ -318,10 +324,16 @@ int main(int, char **) {
       gpu.getDisplayArea(dx, dy);
       std::printf(
           "[REAL] vsync=%u site=%08X RA=%08X SP=%08X GP=%08X\n"
-          "       GPUSTAT=%08X DISP=%u,%u mode=%s\n",
+          "       GPUSTAT=%08X DISP=%u,%u mode=%s\n"
+          "       CD state=%u IF=%u ready=%u mode=%02X disc=%s\n",
           frame, ps1LastIndirectSite(), ctx.r[ps1::RA], ctx.r[ps1::SP],
           ctx.r[ps1::GP], gpu.readGPUSTAT(), dx, dy,
-          gpu.isDisplayModeSet() ? "SET" : "DEFAULT");
+          gpu.isDisplayModeSet() ? "SET" : "DEFAULT",
+          static_cast<unsigned>(cdrom.getState()),
+          static_cast<unsigned>(cdrom.interruptFlag()),
+          cdrom.hasSectorReady() ? 1u : 0u,
+          static_cast<unsigned>(cdrom.getMode()),
+          mountedDisc ? "YES" : "NO");
       consoleUpdate(nullptr);
     }
   };
