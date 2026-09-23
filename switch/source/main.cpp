@@ -72,7 +72,6 @@ int main(int argc, char **argv) {
     gpu.snapshotDisplayBuffer();
 
     ps1::gpu::RendererSwitch renderer(gpu);
-    const bool rendererPass = renderer.init();
 
     std::printf("PS1Recomp - Nintendo Switch\n");
     std::printf("ARM64/libnx bootstrap OK\n");
@@ -84,7 +83,7 @@ int main(int argc, char **argv) {
     std::printf("PS1 timer/IRQ core: %s\\n", timerPass ? "PASS" : "FAIL");
     std::printf("PS1 GPU GP0/VRAM core: %s\\n", gpuPass ? "PASS" : "FAIL");
     std::printf("PS1 controller backend: ACTIVE\\n");
-    std::printf("Switch framebuffer: %s\\n", rendererPass ? "ACTIVE" : "FAIL");
+    std::printf("Switch framebuffer: READY\\n");
     std::printf("A red rectangle should appear after this screen.\\n");
     std::printf("Press + to exit.\n");
 
@@ -94,8 +93,21 @@ int main(int argc, char **argv) {
         const u64 down = padGetButtonsDown(&pad);
         if (down & HidNpadButton_Plus)
             break;
-        if (down & HidNpadButton_A)
-            renderer.renderFrame();
+        if (down & HidNpadButton_A) {
+            // Stop the libnx text console from presenting over our framebuffer.
+            const bool rendererPass = renderer.init();
+            if (rendererPass) {
+                renderer.renderFrame();
+                // Stay in framebuffer mode; do not call consoleUpdate below.
+                while (appletMainLoop()) {
+                    padUpdate(&pad);
+                    if (padGetButtonsDown(&pad) & HidNpadButton_Plus)
+                        break;
+                    renderer.renderFrame();
+                }
+                break;
+            }
+        }
 
         // Reset active-low PS1 pad state, then map Switch controls.
         constexpr uint16_t all =
@@ -125,6 +137,5 @@ int main(int argc, char **argv) {
         consoleUpdate(nullptr);
     }
     renderer.destroy();
-    consoleExit(nullptr);
     return 0;
 }
