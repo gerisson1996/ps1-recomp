@@ -106,7 +106,22 @@ def main() -> int:
     print(f"Generated: {GENERATED_CPP}")
     print(f"Size: {GENERATED_CPP.stat().st_size:,} bytes")
 
-    run(["make", "REAL_GAME=1", "clean"], cwd=SWITCH_DIR)
+    # Do not rely on the Makefile's optional `clean` target here. Some
+    # devkitPro/Codespaces make environments enter the recursive build branch
+    # directly, where that target is intentionally absent. Removing the build
+    # directory is equivalent and also guarantees that switching from the
+    # bootstrap objects to REAL_GAME cannot reuse stale .o files.
+    shutil.rmtree(SWITCH_DIR / "build", ignore_errors=True)
+    for stale in (
+        SWITCH_DIR / "ps1recomp_game.nro",
+        SWITCH_DIR / "ps1recomp_game.elf",
+        SWITCH_DIR / "ps1recomp_game.map",
+    ):
+        try:
+            stale.unlink()
+        except FileNotFoundError:
+            pass
+
     run(["make", f"-j{max(1, args.jobs)}", "REAL_GAME=1"], cwd=SWITCH_DIR)
 
     nro = SWITCH_DIR / "ps1recomp_game.nro"
