@@ -1,6 +1,7 @@
 #include <switch.h>
 #include <cstdio>
 #include <cstdint>
+#include <cstring>
 #include "../../ps1Runtime/include/runtime/cpu_context.h"
 #include "../../ps1Runtime/include/runtime/emuptr.h"
 #include "../../ps1Runtime/include/runtime/input/input.h"
@@ -18,6 +19,35 @@ void recomp_init_dispatch_table();
 void recomp_dispatch(uint8_t* rdram, recomp_context* ctx, uint32_t addr);
 
 alignas(16) static uint8_t g_ps1_ram[2 * 1024 * 1024];
+
+struct PsxExeBootInfo {
+    uint32_t pc, gp, loadAddr, payloadSize, spBase, spOffset;
+};
+
+static bool loadPsxExeImage(const uint8_t *image, size_t imageSize,
+                            ps1::Memory &memory, recomp_context &ctx,
+                            PsxExeBootInfo &out) {
+    if (!image || imageSize < 0x800 || std::memcmp(image, "PS-X EXE", 8) != 0)
+        return false;
+    auto rd32 = [&](size_t off) -> uint32_t {
+        return uint32_t(image[off]) | (uint32_t(image[off+1]) << 8) |
+               (uint32_t(image[off+2]) << 16) | (uint32_t(image[off+3]) << 24);
+    };
+    out = {rd32(0x10), rd32(0x14), rd32(0x18), rd32(0x1C),
+           rd32(0x30), rd32(0x34)};
+    if (out.payloadSize == 0 || 0x800ull + out.payloadSize > imageSize)
+        return false;
+    const uint32_t phys = out.loadAddr & 0x1FFFFFu;
+    if (phys + out.payloadSize > 2u * 1024u * 1024u)
+        return false;
+    std::memcpy(memory.ramPtr() + phys, image + 0x800, out.payloadSize);
+    ctx.reset();
+    ctx.mem = &memory;
+    ctx.bios = nullptr;
+    ctx.r[ps1::GP] = out.gp;
+    ctx.r[ps1::SP] = out.spBase + out.spOffset;
+    return true;
+}
 
 int main(int argc, char **argv) {
     consoleInit(nullptr);
@@ -153,12 +183,19 @@ int main(int argc, char **argv) {
     std::printf("PS1 RAM: %zu bytes\n", sizeof(g_ps1_ram));
     std::printf("RAM mirror test: %s\n\n",
                 *word == 0x50533153 ? "PASS" : "FAIL");
+    // Runtime PS-X EXE boot-loader smoke. This mirrors the state needed when
+    // we move from generated test data to an executable extracted from BIN/CUE.
+    extern const uint8_t _binary_test_psx_start[];
+    extern const uint8_t _binary_test_psx_end[];
     recomp_context recompCtx{};
-    recompCtx.reset();
-    recompCtx.mem = &memory;
-    recompCtx.bios = nullptr;
+    PsxExeBootInfo bootInfo{};
+    const bool psxExeBootPass = loadPsxExeImage(
+        _binary_test_psx_start,
+        static_cast<size_t>(_binary_test_psx_end - _binary_test_psx_start),
+        memory, recompCtx, bootInfo);
     recomp_init_dispatch_table();
-    recomp_dispatch(memory.ramPtr(), &recompCtx, 0x80010000u);
+    if (psxExeBootPass)
+        recomp_dispatch(memory.ramPtr(), &recompCtx, bootInfo.pc);
     // Execute a second recompiled MIPS function whose SW instructions target
     // the real PS1 GP0 MMIO register through Memory::write32().
     recomp_context mmioCtx{};
@@ -199,6 +236,7 @@ int main(int argc, char **argv) {
         recompCtx.r[ps1::V0] == 43u &&
         memory.read32(0x80002000u) == 0x12345678u &&
         recompCtx.r[ps1::ZERO] == 0u;
+    std::printf("PS-X EXE runtime load/header: %s\\n", psxExeBootPass ? "PASS" : "FAIL");
     std::printf("MIPS recomp LW/SW/branch/JAL: %s\\n", recompPass ? "PASS" : "FAIL");
     if (!recompPass) {
         std::printf("  V0=%08X T0=%08X T1=%08X T2=%08X\\n",
