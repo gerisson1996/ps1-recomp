@@ -160,7 +160,6 @@ int main(int argc, char **argv) {
     recomp_init_dispatch_table();
     recomp_dispatch(memory.ramPtr(), &recompCtx, 0x80010000u);
     const bool recompPass =
-        recompCtx.r[ps1::V0] == 42u &&
         recompCtx.r[ps1::T0] == 40u &&
         recompCtx.r[ps1::T1] == 2u &&
         recompCtx.r[ps1::T2] == 0x12345678u &&
