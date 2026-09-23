@@ -14,6 +14,7 @@ public:
 private:
   GPU &gpu_;
   Framebuffer fb_{};
+  NWindow *window_ = nullptr;
   bool initialized_ = false;
 };
 
