@@ -247,6 +247,40 @@ TEST(FunctionFinder, DetectsJALTargets) {
     cleanupFile(path);
 }
 
+TEST(FunctionFinder, LinearSweepKeepsValidatedExtentInsteadOfTrailingData) {
+    const std::string path = "/tmp/ps1recomp_test_ff_linear_extent.elf";
+
+    // Entry function ends at +0x0C. A second function begins at +0x20 and
+    // returns after 12 bytes. Everything after that is non-code data.
+    // The linear sweep must keep the proven 12-byte extent instead of later
+    // expanding the function to the end of the section.
+    std::vector<uint32_t> code(24, 0xFFFFFFFFu);
+    code[0] = makeNOP();
+    code[1] = makeJR_RA();
+    code[2] = makeNOP();
+    for (size_t i = 3; i < 8; ++i)
+        code[i] = makeNOP();
+
+    code[8]  = makeADDIU(0, 2, 1);
+    code[9]  = makeJR_RA();
+    code[10] = makeNOP();
+
+    createElfWithCode(path, code);
+
+    ElfParser elf;
+    ASSERT_TRUE(elf.load(path));
+
+    FunctionFinder finder;
+    finder.findFunctions(elf);
+
+    auto* fn = finder.findByAddress(0x80010020);
+    ASSERT_NE(fn, nullptr);
+    EXPECT_EQ(fn->source, FunctionSource::LinearSweep);
+    EXPECT_EQ(fn->size, 12u);
+
+    cleanupFile(path);
+}
+
 TEST(FunctionFinder, RejectsJALLookingDataWhoseTargetIsNotCode) {
     const std::string path = "/tmp/ps1recomp_test_ff_jal_data.elf";
 
