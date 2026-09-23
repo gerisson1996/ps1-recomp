@@ -23,6 +23,14 @@ jobs:
           cmake -S . -B build-host -DPS1RECOMP_BUILD_TESTS=OFF -DPS1RECOMP_BUILD_RUNTIME=OFF
           cmake --build build-host --target ps1Analyzer ps1Recomp -j2
 
+      - name: Upload host analysis tools
+        uses: actions/upload-artifact@v4
+        with:
+          name: ps1recomp-host-tools
+          path: |
+            build-host/ps1Analyzer/ps1Analyzer
+            build-host/ps1Recomp/ps1Recomp
+
       - name: Generate minimal PS-X EXE
         run: python3 switch/testdata/make_minimal_psxexe.py
 
