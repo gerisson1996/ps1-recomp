@@ -28,7 +28,9 @@ CXXFLAGS := $(CFLAGS) -std=gnu++20 -fno-rtti -ffunction-sections -fdata-sections
 # while still optimizing enough for hardware testing. The later -O1 wins over
 # the -O2 inherited through CFLAGS only in REAL_GAME mode.
 ifeq ($(REAL_GAME),1)
-CXXFLAGS += -O1
+# real_recompiled.cpp is ~4 MiB / 84k lines. Small Codespaces can OOM cc1plus
+# even at -O1, so favor buildability during hardware bring-up.
+CXXFLAGS += -O0 -g0 -fno-var-tracking -fno-var-tracking-assignments
 endif
 ASFLAGS := -g $(ARCH)
 LDFLAGS = -specs=$(DEVKITPRO)/libnx/switch.specs -g $(ARCH) -Wl,--gc-sections -Wl,-Map,$(notdir $*.map)
