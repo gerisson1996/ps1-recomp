@@ -77,6 +77,7 @@ ifeq ($(REAL_GAME),1)
 real_recompiled.o: CXXFLAGS += -O0 -g0 -w \
 	-fno-var-tracking -fno-var-tracking-assignments \
 	-fno-unwind-tables -fno-asynchronous-unwind-tables
+real_recompiled.o: $(TOPDIR)/Makefile
 endif
 
 ifeq ($(REAL_GAME),0)
