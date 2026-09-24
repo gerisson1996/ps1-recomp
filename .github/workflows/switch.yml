@@ -56,6 +56,9 @@ jobs:
           test -s switch/source/recompiled_generated.cpp
           grep -q "switch_smoke" switch/source/recompiled_generated.cpp
           grep -q "recomp_init_dispatch_table" switch/source/recompiled_generated.cpp
+          grep -q "struct recomp_entry_t" switch/source/recompiled_generated.cpp
+          ! grep -q "#include <fmt/format.h>" switch/source/recompiled_generated.cpp
+          ! grep -q "#include <unordered_map>" switch/source/recompiled_generated.cpp
 
       - name: Build NRO
         working-directory: switch
