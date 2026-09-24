@@ -482,10 +482,25 @@ void hle_libcd_CdReadBreak(recomp_context *ctx) {
   ctx->r[V0] = 1;
 }
 
-// StSetMask
-// XA-stream sector filter.  Not modeled.
+// StSetMask(mask, start, end)
+//
+// This KERNEL keeps the rest of PsyQ's STR ring/stream library native. Its
+// native StSetStream calls StSetMask and then the native sector parser reads
+// these three libcd BSS words directly. Treating StSetMask as a no-op leaves
+// them all zero and changes the stream parser's filtering/termination logic
+// before any frame can ever reach MDEC.
+//
+// Mirror the original 0x800292F8 body exactly:
+//   *(0x80065948) = a0;
+//   *(0x80065924) = a1;
+//   *(0x80065944) = a2;
+// The original function does not define v0, so leave it untouched.
 void hle_libcd_StSetMask(recomp_context *ctx) {
-  ctx->r[V0] = 0;
+  if (!ctx || !ctx->mem)
+    return;
+  ctx->mem->write32(0x80065948u, ctx->r[A0]);
+  ctx->mem->write32(0x80065924u, ctx->r[A1]);
+  ctx->mem->write32(0x80065944u, ctx->r[A2]);
 }
 
 void psyq_register_libcd() {
