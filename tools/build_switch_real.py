@@ -205,12 +205,11 @@ def main() -> int:
     print(f"Generated: {GENERATED_CPP}")
     print(f"Size: {GENERATED_CPP.stat().st_size:,} bytes")
 
-    # Do not rely on the Makefile's optional `clean` target here. Some
-    # devkitPro/Codespaces make environments enter the recursive build branch
-    # directly, where that target is intentionally absent. Removing the build
-    # directory is equivalent and also guarantees that switching from the
-    # bootstrap objects to REAL_GAME cannot reuse stale .o files.
-    shutil.rmtree(SWITCH_DIR / "build", ignore_errors=True)
+    # Keep the existing object directory on repeated REAL_GAME builds.
+    # The generated C++ timestamp makes make rebuild real_recompiled.o, while
+    # already-built runtime objects can be reused. This is especially useful in
+    # small Codespaces where a killed cc1plus should be retryable without
+    # throwing away all successful compilation work.
     for stale in (
         SWITCH_DIR / "ps1recomp_game.nro",
         SWITCH_DIR / "ps1recomp_game.elf",
