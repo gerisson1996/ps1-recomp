@@ -30,6 +30,9 @@ HOST_BUILD = ROOT / "build-host"
 PRIVATE_BUILD = ROOT / "build-real"
 SWITCH_DIR = ROOT / "switch"
 GENERATED_CPP = SWITCH_DIR / "source" / "real_recompiled.cpp"
+SPLIT_PREFIX = "real_recompiled_part"
+SPLIT_HEADER = SWITCH_DIR / "source" / "real_recompiled_shared.h"
+SPLIT_DISPATCH = SWITCH_DIR / "source" / "real_recompiled_dispatch.cpp"
 
 
 def run(cmd: list[str], *, cwd: Path = ROOT, env: dict[str, str] | None = None) -> None:
@@ -178,6 +181,91 @@ address = "0x8003776C"
             )
 
 
+def _write_if_changed(path: Path, data: str) -> None:
+    if path.is_file() and path.read_text(encoding="utf-8") == data:
+        return
+    path.write_text(data, encoding="utf-8")
+
+
+def split_generated_cpp(source: Path, *, target_bytes: int = 384 * 1024) -> list[Path]:
+    """Split the huge generated TU into small independently compiled chunks.
+
+    The recompiler emits all guest functions plus dispatch glue into one C++
+    file. That is convenient on large hosts but can make cc1plus exceed the
+    memory limit of a small Codespace even at -O0. The generated file already
+    contains forward declarations for every guest function, so we can turn the
+    declaration prefix into a private header and distribute complete function
+    definitions across several translation units without changing guest code.
+    """
+    text = source.read_text(encoding="utf-8")
+    first = re.search(
+        r"(?m)^void\s+[A-Za-z_][A-Za-z0-9_]*\(uint8_t\* rdram, "
+        r"recomp_context\* ctx\)\s*\{",
+        text,
+    )
+    dispatch_pos = text.find("\n// Dispatch Table\n")
+    if first is None or dispatch_pos < 0 or dispatch_pos <= first.start():
+        raise RuntimeError("cannot split generated C++: expected function/dispatch markers missing")
+
+    prefix = text[:first.start()]
+    body = text[first.start():dispatch_pos]
+    dispatch = text[dispatch_pos + 1:]
+
+    starts = [
+        m.start()
+        for m in re.finditer(
+            r"(?m)^void\s+[A-Za-z_][A-Za-z0-9_]*\(uint8_t\* rdram, "
+            r"recomp_context\* ctx\)\s*\{",
+            body,
+        )
+    ]
+    if not starts:
+        raise RuntimeError("cannot split generated C++: no function definitions found")
+    starts.append(len(body))
+    units = [body[starts[i]:starts[i + 1]] for i in range(len(starts) - 1)]
+
+    header_text = "#pragma once\n" + prefix
+    _write_if_changed(SPLIT_HEADER, header_text)
+
+    chunks: list[str] = []
+    current: list[str] = []
+    current_bytes = 0
+    for unit in units:
+        size = len(unit.encode("utf-8"))
+        if current and current_bytes + size > target_bytes:
+            chunks.append("".join(current))
+            current = []
+            current_bytes = 0
+        current.append(unit)
+        current_bytes += size
+    if current:
+        chunks.append("".join(current))
+
+    outputs: list[Path] = []
+    expected: set[Path] = set()
+    for i, chunk in enumerate(chunks):
+        out = SWITCH_DIR / "source" / f"{SPLIT_PREFIX}{i:02d}.cpp"
+        expected.add(out)
+        data = '#include "real_recompiled_shared.h"\n\n' + chunk
+        _write_if_changed(out, data)
+        outputs.append(out)
+
+    dispatch_data = '#include "real_recompiled_shared.h"\n\n' + dispatch
+    _write_if_changed(SPLIT_DISPATCH, dispatch_data)
+    outputs.append(SPLIT_DISPATCH)
+
+    for stale in (SWITCH_DIR / "source").glob(f"{SPLIT_PREFIX}*.cpp"):
+        if stale not in expected:
+            stale.unlink()
+
+    print(
+        f"Split generated C++: {len(chunks)} function part(s) + dispatch "
+        f"(target {target_bytes // 1024} KiB/part)",
+        flush=True,
+    )
+    return outputs
+
+
 def build_host_tools(jobs: int) -> tuple[Path, Path]:
     analyzer = find_exe(HOST_BUILD / "ps1Analyzer" / "ps1Analyzer")
     recompiler = find_exe(HOST_BUILD / "ps1Recomp" / "ps1Recomp")
@@ -265,6 +353,7 @@ def main() -> int:
         print(f"Generated C++ updated: {GENERATED_CPP}", flush=True)
 
     print(f"Size: {GENERATED_CPP.stat().st_size:,} bytes")
+    split_generated_cpp(GENERATED_CPP)
 
     # Keep the existing object directory on repeated REAL_GAME builds.
     # The generated C++ timestamp makes make rebuild real_recompiled.o, while
