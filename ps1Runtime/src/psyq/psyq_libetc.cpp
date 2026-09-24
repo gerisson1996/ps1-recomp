@@ -94,6 +94,23 @@ void hle_libetc_InterruptCallback(recomp_context *ctx) {
   }
 }
 
+// Some PsyQ helper wrappers specialize InterruptCallback to one IRQ line.
+// This exact KERNEL's wrapper at 0x80019238 is:
+//
+//   fn -> InterruptCallback(4, fn)
+//
+// Its tiny body hashes identically to unrelated one-argument callback setters,
+// so static signature matching can misidentify it as CdDataCallback.  Keep a
+// dedicated HLE name so the private KERNEL compatibility pass can preserve
+// the original semantics without teaching the global signature DB about a
+// game-specific address.
+void hle_libetc_InterruptCallback4(recomp_context *ctx) {
+  const uint32_t fn = ctx->r[A0];
+  ctx->r[A0] = 4;
+  ctx->r[A1] = fn;
+  hle_libetc_InterruptCallback(ctx);
+}
+
 void hle_libetc_DMACallback(recomp_context *ctx) {
   std::size_t n = clampSlot(ctx->r[A0]);
   auto &s = psyq_state();
@@ -136,6 +153,7 @@ void psyq_register_libetc_intr() {
   psyq_register("libetc_RestartCallback",   &hle_libetc_RestartCallback);
   psyq_register("libetc_CheckCallback",     &hle_libetc_CheckCallback);
   psyq_register("libetc_InterruptCallback", &hle_libetc_InterruptCallback);
+  psyq_register("libetc_InterruptCallback4", &hle_libetc_InterruptCallback4);
   psyq_register("libetc_DMACallback",       &hle_libetc_DMACallback);
   psyq_register("libetc_SetIntrMask",       &hle_libetc_SetIntrMask);
   psyq_register("libetc_GetIntrMask",       &hle_libetc_GetIntrMask);
