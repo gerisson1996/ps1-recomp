@@ -190,16 +190,25 @@ inline uint32_t &ps1LastIndirectSite() {
   return site;
 }
 
-#define PS1_SET_INDIRECT_SITE(pc) (ps1LastIndirectSite() = (pc))
+inline uint32_t &ps1LastIndirectTarget() {
+  static uint32_t target = 0;
+  return target;
+}
+
+#define PS1_SET_INDIRECT_SITE_TARGET(pc, addr)                                 \
+  do {                                                                         \
+    ps1LastIndirectSite() = (pc);                                              \
+    ps1LastIndirectTarget() = static_cast<uint32_t>(addr);                     \
+  } while (0)
 
 #define CALL_INDIRECT_AT(ctx, addr, pc)                                        \
   do {                                                                         \
-    PS1_SET_INDIRECT_SITE(pc);                                                 \
+    PS1_SET_INDIRECT_SITE_TARGET(pc, addr);                                    \
     CALL_INDIRECT(ctx, addr);                                                  \
   } while (0)
 #define JUMP_INDIRECT_AT(ctx, addr, pc)                                        \
   do {                                                                         \
-    PS1_SET_INDIRECT_SITE(pc);                                                 \
+    PS1_SET_INDIRECT_SITE_TARGET(pc, addr);                                    \
     JUMP_INDIRECT(ctx, addr);                                                  \
   } while (0)
 
@@ -224,7 +233,7 @@ inline uint32_t &ps1LastIndirectSite() {
   } while (0)
 #define JUMP_INDIRECT_RESUME_AT(ctx, addr, pc)                                 \
   do {                                                                         \
-    PS1_SET_INDIRECT_SITE(pc);                                                 \
+    PS1_SET_INDIRECT_SITE_TARGET(pc, addr);                                    \
     JUMP_INDIRECT_RESUME(ctx, addr);                                           \
   } while (0)
 #define COP0_RFE(ctx) /* NOP for now */
