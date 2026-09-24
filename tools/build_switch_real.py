@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -66,6 +67,34 @@ def apply_kernel_compat_overrides(config: Path, kernel: Path) -> None:
 
     text = config.read_text(encoding="utf-8")
     additions: list[str] = []
+    applied: list[str] = []
+
+    # Some functions are recognised by the analyzer but deliberately left
+    # native by the global HLE allowlist. For this exact KERNEL, hardware
+    # diagnostics show that its F0000009/0x20 WaitEvent depends on the
+    # Timer0 InterruptCallback path. The runtime only knows which callback to
+    # tick when libetc_InterruptCallback is HLE'd into PsyqState.
+    def force_detected_hle(name: str) -> bool:
+        nonlocal text
+        block_re = re.compile(
+            r"\[\[hle_functions\]\]\n(?:(?!\n\[\[).)*",
+            re.MULTILINE | re.DOTALL,
+        )
+        for match in block_re.finditer(text):
+            block = match.group(0)
+            if f'name = "{name}"' not in block:
+                continue
+            if "hle = true" in block:
+                return true
+            patched = re.sub(r"(?m)^hle\s*=\s*false\s*$", "hle = true", block, count=1)
+            if patched == block:
+                return false
+            text = text[:match.start()] + patched + text[match.end():]
+            return true
+        return false
+
+    if force_detected_hle("libetc_InterruptCallback"):
+        applied.append("InterruptCallback")
 
     if 'name = "libetc_VSync"' not in text:
         additions.append(
@@ -78,6 +107,7 @@ name = "libetc_VSync"
 address = "0x800255F8"
 """
         )
+        applied.append("VSync")
 
     if 'name = "libgpu_DrawSync"' not in text:
         additions.append(
@@ -90,12 +120,16 @@ name = "libgpu_DrawSync"
 address = "0x8003776C"
 """
         )
+        applied.append("DrawSync")
 
+    config.write_text(text, encoding="utf-8")
     if additions:
         with config.open("a", encoding="utf-8") as out:
             out.write("\n")
             out.write("\n".join(additions))
-        print("Applied KERNEL compatibility HLEs: VSync, DrawSync", flush=True)
+
+    if applied:
+        print("Applied KERNEL compatibility HLEs: " + ", ".join(applied), flush=True)
 
 
 def build_host_tools(jobs: int) -> tuple[Path, Path]:
