@@ -71,6 +71,12 @@ private:
   std::vector<uint16_t> inputBuffer_;
   std::vector<uint32_t> outputBuffer_;
 
+  // Cumulative host-side diagnostics (not emulated registers).
+  uint64_t decodeCommandCount_ = 0;
+  uint64_t macroblockCount_ = 0;
+  uint64_t dmaInWordCount_ = 0;
+  uint64_t dmaOutWordCount_ = 0;
+
   // 8x8 block scratch
   int16_t block_[64]; // current 8x8 block
 
