@@ -22,6 +22,14 @@ ARCH := -march=armv8-a+crc+crypto -mtune=cortex-a57 -mtp=soft -fPIE
 CFLAGS := -g -Wall -O2 -ffunction-sections $(ARCH) $(DEFINES)
 CFLAGS += $(INCLUDE) -D__SWITCH__ -DFMT_HEADER_ONLY=1
 CXXFLAGS := $(CFLAGS) -std=gnu++20 -fno-rtti -ffunction-sections -fdata-sections
+# The privately generated real_recompiled.cpp is a very large translation
+# unit. devkitA64 at -O2 can exceed the memory limit of small Codespaces and
+# get cc1plus killed by the host. -O1 keeps the bring-up build lightweight
+# while still optimizing enough for hardware testing. The later -O1 wins over
+# the -O2 inherited through CFLAGS only in REAL_GAME mode.
+ifeq ($(REAL_GAME),1)
+CXXFLAGS += -O1
+endif
 ASFLAGS := -g $(ARCH)
 LDFLAGS = -specs=$(DEVKITPRO)/libnx/switch.specs -g $(ARCH) -Wl,--gc-sections -Wl,-Map,$(notdir $*.map)
 LIBS := -lnx
