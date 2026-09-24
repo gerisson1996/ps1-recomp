@@ -43,6 +43,61 @@ def find_exe(base: Path) -> Path | None:
     return None
 
 
+def apply_kernel_compat_overrides(config: Path, kernel: Path) -> None:
+    """Apply narrowly-scoped HLE overrides for a known PS-X EXE layout.
+
+    The analyzer intentionally keeps some PsyQ functions native when their
+    signatures are ambiguous.  For this exact bring-up KERNEL we have hardware
+    proof that the native VSync/DrawSync paths spin on PS1-only timing/status
+    state, while the runtime already provides cooperative HLE implementations.
+    Keep the override private-build-only: it modifies build-real/kernel.toml,
+    never the public signature database or any game binary.
+    """
+    header = kernel.read_bytes()[:0x800]
+    if len(header) < 0x20:
+        return
+
+    pc = int.from_bytes(header[0x10:0x14], "little")
+    load_addr = int.from_bytes(header[0x18:0x1C], "little")
+    payload_size = int.from_bytes(header[0x1C:0x20], "little")
+
+    if (pc, load_addr, payload_size) != (0x80010B08, 0x80010000, 985088):
+        return
+
+    text = config.read_text(encoding="utf-8")
+    additions: list[str] = []
+
+    if 'name = "libetc_VSync"' not in text:
+        additions.append(
+            """[[hle_functions]]
+subsystem = "VSync"
+hle = true
+stub_type = "recompile"
+library = "libetc"
+name = "libetc_VSync"
+address = "0x800255F8"
+"""
+        )
+
+    if 'name = "libgpu_DrawSync"' not in text:
+        additions.append(
+            """[[hle_functions]]
+subsystem = "Graphics"
+hle = true
+stub_type = "recompile"
+library = "libgpu"
+name = "libgpu_DrawSync"
+address = "0x8003776C"
+"""
+        )
+
+    if additions:
+        with config.open("a", encoding="utf-8") as out:
+            out.write("\n")
+            out.write("\n".join(additions))
+        print("Applied KERNEL compatibility HLEs: VSync, DrawSync", flush=True)
+
+
 def build_host_tools(jobs: int) -> tuple[Path, Path]:
     analyzer = find_exe(HOST_BUILD / "ps1Analyzer" / "ps1Analyzer")
     recompiler = find_exe(HOST_BUILD / "ps1Recomp" / "ps1Recomp")
@@ -85,7 +140,8 @@ def main() -> int:
 
     PRIVATE_BUILD.mkdir(parents=True, exist_ok=True)
     local_kernel = PRIVATE_BUILD / "KERNEL.BIN"
-    shutil.copyfile(kernel, local_kernel)
+    if kernel != local_kernel.resolve():
+        shutil.copyfile(kernel, local_kernel)
 
     analyzer, recompiler = build_host_tools(max(1, args.jobs))
 
@@ -98,6 +154,7 @@ def main() -> int:
     generated_arg = GENERATED_CPP.relative_to(ROOT).as_posix()
 
     run([str(analyzer), kernel_arg, config_arg], env=env)
+    apply_kernel_compat_overrides(config, local_kernel)
     run([str(recompiler), config_arg, generated_arg], env=env)
 
     if not GENERATED_CPP.is_file() or GENERATED_CPP.stat().st_size < 1024:
