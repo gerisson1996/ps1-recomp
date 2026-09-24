@@ -45,15 +45,7 @@ def find_exe(base: Path) -> Path | None:
 
 
 def apply_kernel_compat_overrides(config: Path, kernel: Path) -> None:
-    """Apply narrowly-scoped HLE overrides for a known PS-X EXE layout.
-
-    The analyzer intentionally keeps some PsyQ functions native when their
-    signatures are ambiguous.  For this exact bring-up KERNEL we have hardware
-    proof that the native VSync/DrawSync paths spin on PS1-only timing/status
-    state, while the runtime already provides cooperative HLE implementations.
-    Keep the override private-build-only: it modifies build-real/kernel.toml,
-    never the public signature database or any game binary.
-    """
+    """Apply narrowly-scoped HLE overrides for the known bring-up KERNEL."""
     header = kernel.read_bytes()[:0x800]
     if len(header) < 0x20:
         return
@@ -69,35 +61,10 @@ def apply_kernel_compat_overrides(config: Path, kernel: Path) -> None:
     additions: list[str] = []
     applied: list[str] = []
 
-    # Some functions are recognised by the analyzer but deliberately left
-    # native by the global HLE allowlist. For this exact KERNEL, hardware
-    # diagnostics show that its F0000009/0x20 WaitEvent depends on the
-    # Timer0 InterruptCallback path. The runtime only knows which callback to
-    # tick when libetc_InterruptCallback is HLE'd into PsyqState.
-    def force_detected_hle(name: str) -> bool:
-        nonlocal text
-        block_re = re.compile(
-            r"\[\[hle_functions\]\]\n(?:(?!\n\[\[).)*",
-            re.MULTILINE | re.DOTALL,
-        )
-        for match in block_re.finditer(text):
-            block = match.group(0)
-            if f'name = "{name}"' not in block:
-                continue
-            if "hle = true" in block:
-                return true
-            patched = re.sub(r"(?m)^hle\s*=\s*false\s*$", "hle = true", block, count=1)
-            if patched == block:
-                return False
-            text = text[:match.start()] + patched + text[match.end():]
-            return true
-        return False
-
-    # 0x80019238 is not CdDataCallback in this KERNEL. Its native
-    # instructions are a tiny wrapper that calls InterruptCallback(4, fn).
-    # The body is short enough to collide with one-argument callback setters,
-    # so the hash matcher labels it libcd_CdDataCallback. Retarget only this
-    # exact address to a fixed-line InterruptCallback HLE.
+    # 0x80019238 is a tiny wrapper equivalent to:
+    #     InterruptCallback(4, fn)
+    # Its short body collides with a one-argument libcd callback signature, so
+    # retarget only this exact address to a dedicated runtime HLE.
     block_re = re.compile(
         r"\[\[hle_functions\]\]\n(?:(?!\n\[\[).)*",
         re.MULTILINE | re.DOTALL,
@@ -106,8 +73,38 @@ def apply_kernel_compat_overrides(config: Path, kernel: Path) -> None:
         block = match.group(0)
         if 'address = "0x80019238"' not in block:
             continue
+
         patched = block
-        patched = re.sub(r'(?m)^name\s*=\s*"[^"]+"\s*    if 'name = "libetc_VSync"' not in text:
+        patched = re.sub(
+            r'(?m)^name\s*=\s*"[^"]+"\s*$',
+            'name = "libetc_InterruptCallback4"',
+            patched,
+            count=1,
+        )
+        patched = re.sub(
+            r'(?m)^library\s*=\s*"[^"]+"\s*$',
+            'library = "libetc"',
+            patched,
+            count=1,
+        )
+        patched = re.sub(
+            r'(?m)^subsystem\s*=\s*"[^"]+"\s*$',
+            'subsystem = "VSync"',
+            patched,
+            count=1,
+        )
+        patched = re.sub(
+            r'(?m)^hle\s*=\s*(?:false|true)\s*$',
+            'hle = true',
+            patched,
+            count=1,
+        )
+
+        text = text[:match.start()] + patched + text[match.end():]
+        applied.append("InterruptCallback4@80019238")
+        break
+
+    if 'name = "libetc_VSync"' not in text:
         additions.append(
             """[[hle_functions]]
 subsystem = "VSync"
