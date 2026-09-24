@@ -104,20 +104,24 @@ std::string emitDispatchBody() {
 #endif
         std::abort();
     }
-    static std::unordered_map<uint32_t, uint32_t> s_unknownHits;
-    auto& hitCount = s_unknownHits[addr];
-    if (hitCount < 5) {
+    static uint32_t s_unknownAddr = 0;
+    static uint32_t s_unknownHitCount = 0;
+    if (s_unknownAddr != addr) {
+        s_unknownAddr = addr;
+        s_unknownHitCount = 0;
+    }
+    if (s_unknownHitCount < 5) {
         std::fprintf(stderr,
                      "[DISPATCH] Unknown target: 0x%08X (RA=0x%08X, phys=0x%08X)\n",
                      static_cast<unsigned>(addr),
                      static_cast<unsigned>(ctx->r[31]),
                      static_cast<unsigned>(phys));
-    } else if (hitCount == 5) {
+    } else if (s_unknownHitCount == 5) {
         std::fprintf(stderr,
                      "[DISPATCH] Unknown target: 0x%08X -- suppressing further logs\n",
                      static_cast<unsigned>(addr));
     }
-    hitCount++;
+    ++s_unknownHitCount;
 }
 )CPP";
 }
