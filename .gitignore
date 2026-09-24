@@ -61,6 +61,9 @@ tools/sp_sentry_inject.py
 # Private/local real-game recompilation outputs
 build-real/
 switch/source/real_recompiled.cpp
+switch/source/real_recompiled_shared.h
+switch/source/real_recompiled_dispatch.cpp
+switch/source/real_recompiled_part*.cpp
 switch/ps1recomp_game.nro
 switch/ps1recomp_game.elf
 switch/ps1recomp_game.map
