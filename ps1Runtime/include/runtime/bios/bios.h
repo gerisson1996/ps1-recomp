@@ -249,6 +249,12 @@ public:
             drainDeferredNoStack_};
   }
   const EventSystem &eventSystem() const { return eventSystem_; }
+  uint32_t lastWaitEventId() const {
+    return lastWaitEventId_.load(std::memory_order_relaxed);
+  }
+  uint32_t lastWaitEventResult() const {
+    return lastWaitEventResult_.load(std::memory_order_relaxed);
+  }
 
   /// Re-entrancy guard for `drainPendingCallbacks`.
   ///
@@ -295,6 +301,10 @@ private:
   input::InputController *input_ = nullptr;
   cdrom::CdromController *cdrom_ = nullptr;
   ::ps1::DMA *dma_ = nullptr;
+
+  // Most recent B0:0A WaitEvent observation, for diagnostic console.
+  std::atomic<uint32_t> lastWaitEventId_{0xFFFFFFFFu};
+  std::atomic<uint32_t> lastWaitEventResult_{0};
 
   // Pad buffer state (InitPAD / StartPAD)
   uint32_t padBuf1Addr_ = 0;
