@@ -397,7 +397,8 @@ int main(int, char **) {
           "       CD sm=%u resp=%02X,%02X hleSync=%u hleReady=%u nativeCD=%u,%u nativeVB=%u\n"
           "       VRAM nz=%u hash=%08X display=%s\n"
           "       MDEC dec=%llu mb=%llu in=%llu out=%llu ready=%u busy=%u gameState=%u\n"
-          "       WAIT id=%u res=%u valid=%u cls=%08X spec=%08X en=%u trig=%u pend=%u\n",
+          "       WAIT id=%u res=%u valid=%u cls=%08X spec=%08X en=%u trig=%u pend=%u\n"
+          "       INTR cb4=%08X cb5=%08X cb6=%08X\n",
           frame, ps1LastIndirectSite(), ps1LastIndirectTarget(),
           ctx.r[ps1::RA], ctx.r[ps1::SP], ctx.r[ps1::GP],
           gpu.readGPUSTAT(), dx, dy,
@@ -423,7 +424,9 @@ int main(int, char **) {
           static_cast<unsigned>(memory.read8(0x80062DFCu)),
           waitId, waitResult, waitDbg.valid ? 1u : 0u,
           waitDbg.classId, waitDbg.specId, waitDbg.enabled ? 1u : 0u,
-          waitDbg.triggered ? 1u : 0u, waitDbg.pendingTrigger ? 1u : 0u);
+          waitDbg.triggered ? 1u : 0u, waitDbg.pendingTrigger ? 1u : 0u,
+          psyqDbg.intrCallback[4], psyqDbg.intrCallback[5],
+          psyqDbg.intrCallback[6]);
       consoleUpdate(nullptr);
     }
   };
