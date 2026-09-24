@@ -21,6 +21,7 @@ import re
 import shutil
 import subprocess
 import sys
+import tomllib
 from pathlib import Path
 
 
@@ -148,26 +149,32 @@ address = "0x8003776C"
         print("Applied KERNEL compatibility HLEs: " + ", ".join(applied), flush=True)
 
     # Fail early if a future analyzer-format change prevents a compatibility
-    # patch from landing. This is safer than compiling an NRO that silently
-    # reintroduces the WaitEvent/VSync/DrawSync stalls.
-    final_text = config.read_text(encoding="utf-8")
+    # patch from landing. Parse TOML structurally: searching raw text by address
+    # is unsafe because the same address also appears in [[functions]].
+    with config.open("rb") as fp:
+        parsed_config = tomllib.load(fp)
+    hle_entries = parsed_config.get("hle_functions", [])
     required = (
-        ('address = "0x80019238"', 'name = "libetc_InterruptCallback4"'),
-        ('address = "0x800255F8"', 'name = "libetc_VSync"'),
-        ('address = "0x8003776C"', 'name = "libgpu_DrawSync"'),
+        ("0x80019238", "libetc_InterruptCallback4"),
+        ("0x800255F8", "libetc_VSync"),
+        ("0x8003776C", "libgpu_DrawSync"),
     )
-    for address_line, name_line in required:
-        pos = final_text.find(address_line)
-        if pos < 0:
-            raise RuntimeError(f"compat HLE missing from config: {address_line}")
-        block_start = final_text.rfind("[[hle_functions]]", 0, pos)
-        block_end = final_text.find("[[hle_functions]]", pos)
-        if block_end < 0:
-            block_end = len(final_text)
-        block = final_text[block_start:block_end]
-        if name_line not in block or "hle = true" not in block:
+    for expected_addr, expected_name in required:
+        matches = [
+            entry for entry in hle_entries
+            if str(entry.get("address", "")).lower() == expected_addr.lower()
+        ]
+        if not matches:
             raise RuntimeError(
-                f"compat HLE did not validate for {address_line}: expected {name_line}"
+                f"compat HLE missing from config: address={expected_addr}"
+            )
+        if not any(
+            entry.get("name") == expected_name and entry.get("hle") is True
+            for entry in matches
+        ):
+            raise RuntimeError(
+                f"compat HLE did not validate for address={expected_addr}: "
+                f"expected name={expected_name!r}, hle=true"
             )
 
 
