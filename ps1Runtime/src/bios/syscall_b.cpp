@@ -26,11 +26,16 @@ void Bios::handleB0(uint32_t index) {
   case 0x09: // closeEvent
     ctx_.r[V0] = eventSystem_.closeEvent(ctx_.r[A0]);
     break;
-  case 0x0A: // waitEvent
+  case 0x0A: { // waitEvent
     // Drain pending callbacks (game-thread yield point)
+    const uint32_t eventId = ctx_.r[A0];
+    lastWaitEventId_.store(eventId, std::memory_order_relaxed);
     drainPendingCallbacks();
-    ctx_.r[V0] = eventSystem_.waitEvent(ctx_.r[A0]);
+    const uint32_t result = eventSystem_.waitEvent(eventId);
+    lastWaitEventResult_.store(result, std::memory_order_relaxed);
+    ctx_.r[V0] = result;
     break;
+  }
   case 0x0B: { // testEvent
     // Drain pending callbacks (game-thread yield point)
     drainPendingCallbacks();
