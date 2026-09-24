@@ -281,6 +281,7 @@ int main(int, char **) {
 
     padUpdate(&pad);
     const u64 held = padGetButtons(&pad);
+    const u64 down = padGetButtonsDown(&pad);
     if ((held & HidNpadButton_Plus) && (held & HidNpadButton_Minus))
       cleanExit(renderer);
     mapPad(input, held);
@@ -327,30 +328,61 @@ int main(int, char **) {
     bios.updatePadBuffers();
     gpu.snapshotDisplayBuffer();
 
-    // Diagnostic-first bring-up: never hide the console automatically.
-    // The previous 3-second auto-switch made a healthy-but-not-drawing game
-    // indistinguishable from a crash because the framebuffer was simply black.
-    // Keep printing live guest state until the user explicitly presses R3.
-    if (!rendererActive && (held & HidNpadButton_StickR)) {
-      std::printf("[REAL] R3 -> switching to VRAM\n");
+    // Diagnostic-first bring-up: never continue running the guest after
+    // detaching the libnx console. The synthetic framebuffer test is stable,
+    // but keeping the real guest executing while the default window changes
+    // ownership caused an Atmosphere crash on hardware. R3 therefore shows a
+    // frozen snapshot only; + exits the preview cleanly.
+    if (!rendererActive && (down & HidNpadButton_StickR)) {
+      std::printf("[REAL] R3 -> frozen VRAM preview (+ exits)\n");
       consoleUpdate(nullptr);
       rendererActive = renderer.init();
+      if (rendererActive) {
+        while (appletMainLoop()) {
+          padUpdate(&pad);
+          if (padGetButtonsDown(&pad) & HidNpadButton_Plus)
+            break;
+          renderer.renderFrame();
+          svcSleepThread(16'000'000);
+        }
+        renderer.destroy();
+        std::_Exit(0);
+      } else {
+        std::printf("[REAL] framebuffer init failed; console restored\n");
+        consoleUpdate(nullptr);
+      }
     }
 
-    if (rendererActive) {
-      renderer.renderFrame();
-    } else if ((frame % 60) == 0) {
+    if ((frame % 60) == 0) {
       uint32_t dx = 0, dy = 0;
       gpu.getDisplayArea(dx, dy);
       const uint32_t cdSmState = memory.read32(0x80059704u);
       const uint8_t cdResp0 = memory.read8(0x800596FCu);
       const uint8_t cdResp1 = memory.read8(0x800596FDu);
       auto &psyqDbg = ps1::psyq::psyq_state();
+
+      // Cheap once-per-second proof that the game is actually drawing or
+      // uploading image data. Count non-black words across the full 1 MiB
+      // VRAM snapshot and keep a small rolling hash so changes are visible
+      // without switching away from the diagnostic console.
+      const auto *vram = gpu.getDisplayVRAM();
+      uint32_t vramNonZero = 0;
+      uint32_t vramHash = 2166136261u;
+      for (uint32_t i = 0; i < ps1::gpu::GPU::VRAM_WIDTH *
+                                  ps1::gpu::GPU::VRAM_HEIGHT; ++i) {
+        const uint16_t px = vram[i].raw;
+        if (px != 0)
+          ++vramNonZero;
+        vramHash ^= px;
+        vramHash *= 16777619u;
+      }
+
       std::printf(
           "[REAL] vsync=%u site=%08X RA=%08X SP=%08X GP=%08X\n"
           "       GPUSTAT=%08X DISP=%u,%u mode=%s\n"
           "       CD hw=%u IF=%u sector=%u mode=%02X cmd=%02X disc=%s\n"
-          "       CD sm=%u resp=%02X,%02X hleSync=%u hleReady=%u nativeVB=%u\n",
+          "       CD sm=%u resp=%02X,%02X hleSync=%u hleReady=%u nativeVB=%u\n"
+          "       VRAM nz=%u hash=%08X display=%s\n",
           frame, ps1LastIndirectSite(), ctx.r[ps1::RA], ctx.r[ps1::SP],
           ctx.r[ps1::GP], gpu.readGPUSTAT(), dx, dy,
           gpu.isDisplayModeSet() ? "SET" : "DEFAULT",
@@ -363,7 +395,8 @@ int main(int, char **) {
           cdSmState, cdResp0, cdResp1,
           static_cast<unsigned>(psyqDbg.cdSyncByte.load(std::memory_order_acquire)),
           static_cast<unsigned>(psyqDbg.cdReadyByte.load(std::memory_order_acquire)),
-          nativeVsyncMirror ? memory.read32(kNativeVsyncCounterAddr) : 0u);
+          nativeVsyncMirror ? memory.read32(kNativeVsyncCounterAddr) : 0u,
+          vramNonZero, vramHash, gpu.isDisplayEnabled() ? "ON" : "OFF");
       consoleUpdate(nullptr);
     }
   };
@@ -374,7 +407,7 @@ int main(int, char **) {
 
   std::printf("Dispatch table ready. Starting PC=%08X\n", boot.pc);
   std::printf("Diagnostic console stays visible.\n");
-  std::printf("R3 = show VRAM | PLUS+MINUS = exit\n");
+  std::printf("R3 = frozen VRAM preview | PLUS+MINUS = exit\n");
   consoleUpdate(nullptr);
 
   // This call normally never returns: the recompiled game owns the thread.
