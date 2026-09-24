@@ -18,6 +18,11 @@ jobs:
         with:
           submodules: recursive
 
+      - name: Validate private real-game build helper
+        run: |
+          python3 -m py_compile tools/build_switch_real.py
+          sh -n tools/r.sh
+
       - name: Build host analyzer and recompiler
         run: |
           cmake -S . -B build-host -DPS1RECOMP_BUILD_TESTS=OFF -DPS1RECOMP_BUILD_RUNTIME=OFF
