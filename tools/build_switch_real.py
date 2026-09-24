@@ -88,10 +88,10 @@ def apply_kernel_compat_overrides(config: Path, kernel: Path) -> None:
                 return true
             patched = re.sub(r"(?m)^hle\s*=\s*false\s*$", "hle = true", block, count=1)
             if patched == block:
-                return false
+                return False
             text = text[:match.start()] + patched + text[match.end():]
             return true
-        return false
+        return False
 
     if force_detected_hle("libetc_InterruptCallback"):
         applied.append("InterruptCallback")
