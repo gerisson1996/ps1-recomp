@@ -33,6 +33,16 @@ public:
   bool dataInFull() const { return inputBuffer_.size() >= 0xFFFF; }
   bool dataOutEmpty() const { return outputBuffer_.empty(); }
 
+  // Bring-up diagnostics: cumulative activity counters. These are intentionally
+  // not part of emulated hardware state and therefore are not cleared by reset().
+  uint64_t decodeCommandCount() const { return decodeCommandCount_; }
+  uint64_t macroblockCount() const { return macroblockCount_; }
+  uint64_t dmaInWordCount() const { return dmaInWordCount_; }
+  uint64_t dmaOutWordCount() const { return dmaOutWordCount_; }
+  uint32_t outputWordsReady() const {
+    return static_cast<uint32_t>(outputBuffer_.size());
+  }
+
   // Zigzag scan order (public for testing)
   static const uint8_t ZIGZAG[64];
 
