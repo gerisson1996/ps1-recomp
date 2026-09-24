@@ -19,6 +19,17 @@ struct Event {
   bool pendingTrigger; // trigger fired while disabled; applied on EnableEvent
 };
 
+struct EventDebugInfo {
+  bool valid = false;
+  uint32_t classId = 0;
+  uint32_t specId = 0;
+  uint32_t mode = 0;
+  uint32_t handler = 0;
+  bool enabled = false;
+  bool triggered = false;
+  bool pendingTrigger = false;
+};
+
 struct PendingCallback {
   uint32_t handlerPc;
   uint32_t a0;     // value for ctx->r4 before call
@@ -40,6 +51,9 @@ public:
   uint32_t testEvent(uint32_t eventId);
   uint32_t enableEvent(uint32_t eventId);
   uint32_t disableEvent(uint32_t eventId);
+
+  // Snapshot one event descriptor for bring-up diagnostics.
+  EventDebugInfo debugInfo(uint32_t eventId) const;
 
   // Internal Emulator Functions (e.g. called by simulated hardware)
   void triggerEvent(uint32_t classId, uint32_t specId);
