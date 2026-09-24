@@ -40,7 +40,7 @@ TEST(DispatchEmitter, FatalMessageNamesAddressCallerAndCause) {
 TEST(DispatchEmitter, AbortIsReachedBeforeTheRateLimitedLogging) {
   const std::string body = emitDispatchBody();
   const size_t abortAt = at(body, "std::abort();");
-  const size_t logAt = at(body, "s_unknownHits");
+  const size_t logAt = at(body, "s_unknownHitCount");
   ASSERT_NE(abortAt, std::string::npos);
   ASSERT_NE(logAt, std::string::npos);
   EXPECT_LT(abortAt, logAt)
