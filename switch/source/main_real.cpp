@@ -382,7 +382,8 @@ int main(int, char **) {
           "       GPUSTAT=%08X DISP=%u,%u mode=%s\n"
           "       CD hw=%u IF=%u sector=%u mode=%02X cmd=%02X disc=%s\n"
           "       CD sm=%u resp=%02X,%02X hleSync=%u hleReady=%u nativeVB=%u\n"
-          "       VRAM nz=%u hash=%08X display=%s\n",
+          "       VRAM nz=%u hash=%08X display=%s\n"
+          "       MDEC dec=%llu mb=%llu in=%llu out=%llu ready=%u busy=%u\n",
           frame, ps1LastIndirectSite(), ctx.r[ps1::RA], ctx.r[ps1::SP],
           ctx.r[ps1::GP], gpu.readGPUSTAT(), dx, dy,
           gpu.isDisplayModeSet() ? "SET" : "DEFAULT",
@@ -396,7 +397,12 @@ int main(int, char **) {
           static_cast<unsigned>(psyqDbg.cdSyncByte.load(std::memory_order_acquire)),
           static_cast<unsigned>(psyqDbg.cdReadyByte.load(std::memory_order_acquire)),
           nativeVsyncMirror ? memory.read32(kNativeVsyncCounterAddr) : 0u,
-          vramNonZero, vramHash, gpu.isDisplayEnabled() ? "ON" : "OFF");
+          vramNonZero, vramHash, gpu.isDisplayEnabled() ? "ON" : "OFF",
+          static_cast<unsigned long long>(mdec.decodeCommandCount()),
+          static_cast<unsigned long long>(mdec.macroblockCount()),
+          static_cast<unsigned long long>(mdec.dmaInWordCount()),
+          static_cast<unsigned long long>(mdec.dmaOutWordCount()),
+          mdec.outputWordsReady(), mdec.isBusy() ? 1u : 0u);
       consoleUpdate(nullptr);
     }
   };
