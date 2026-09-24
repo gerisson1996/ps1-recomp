@@ -12,7 +12,9 @@ std::string emitDispatchBody() {
         static bool nullDispatchWarned = false;
         if (!nullDispatchWarned) {
             nullDispatchWarned = true;
-            fmt::print("[DISPATCH] null addr suppressed (startup transient, RA=0x{:08X})\n", ctx->r[31]);
+            std::fprintf(stdout,
+                         "[DISPATCH] null addr suppressed (startup transient, RA=0x%08X)\n",
+                         static_cast<unsigned>(ctx->r[31]));
         }
         return;
     }
@@ -84,13 +86,16 @@ std::string emitDispatchBody() {
         // to the wrong function.  The host stack always names the emitted
         // function that issued the dispatch; resolve it with
         //   addr2line -f -C -e build/ps1Runtime/ps1Runtime <offset>
-        fmt::print(stderr,
-                   "[DISPATCH] FATAL: unmapped call to 0x{:08X} (phys=0x{:08X})\n"
-                   "           issued from guest site 0x{:08X}; RA=0x{:08X}\n"
-                   "           This address was never emitted by the recompiler.\n"
-                   "           RA is stale on direct-JAL paths -- trust the site and the stack.\n"
-                   "           Set PS1_DISPATCH_PERMISSIVE=1 to log and continue instead.\n",
-                   addr, phys, ps1LastIndirectSite(), ctx->r[31]);
+        std::fprintf(stderr,
+                     "[DISPATCH] FATAL: unmapped call to 0x%08X (phys=0x%08X)\n"
+                     "           issued from guest site 0x%08X; RA=0x%08X\n"
+                     "           This address was never emitted by the recompiler.\n"
+                     "           RA is stale on direct-JAL paths -- trust the site and the stack.\n"
+                     "           Set PS1_DISPATCH_PERMISSIVE=1 to log and continue instead.\n",
+                     static_cast<unsigned>(addr),
+                     static_cast<unsigned>(phys),
+                     static_cast<unsigned>(ps1LastIndirectSite()),
+                     static_cast<unsigned>(ctx->r[31]));
         std::fflush(stderr);
 #ifndef __SWITCH__
         void* bt[24];
@@ -102,10 +107,15 @@ std::string emitDispatchBody() {
     static std::unordered_map<uint32_t, uint32_t> s_unknownHits;
     auto& hitCount = s_unknownHits[addr];
     if (hitCount < 5) {
-        fmt::print(stderr, "[DISPATCH] Unknown target: 0x{:08X} (RA=0x{:08X}, phys=0x{:08X})\n",
-                   addr, ctx->r[31], phys);
+        std::fprintf(stderr,
+                     "[DISPATCH] Unknown target: 0x%08X (RA=0x%08X, phys=0x%08X)\n",
+                     static_cast<unsigned>(addr),
+                     static_cast<unsigned>(ctx->r[31]),
+                     static_cast<unsigned>(phys));
     } else if (hitCount == 5) {
-        fmt::print(stderr, "[DISPATCH] Unknown target: 0x{:08X} -- suppressing further logs\n", addr);
+        std::fprintf(stderr,
+                     "[DISPATCH] Unknown target: 0x%08X -- suppressing further logs\n",
+                     static_cast<unsigned>(addr));
     }
     hitCount++;
 }
