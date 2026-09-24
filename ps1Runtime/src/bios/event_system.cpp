@@ -144,6 +144,25 @@ uint32_t EventSystem::enableEvent(uint32_t eventId) {
   return 1;
 }
 
+EventDebugInfo EventSystem::debugInfo(uint32_t eventId) const {
+  std::lock_guard<std::mutex> lk(eventsMtx_);
+  EventDebugInfo out;
+  if (eventId >= events_.size())
+    return out;
+
+  const auto &ev = events_[eventId];
+  out.valid = true;
+  out.classId = ev.classId;
+  out.specId = ev.specId;
+  out.mode = ev.mode;
+  out.handler = ev.handler;
+  out.enabled = ev.enabled;
+  out.pendingTrigger = ev.pendingTrigger;
+  out.triggered =
+      (triggeredBits_.load(std::memory_order_acquire) & (1u << eventId)) != 0;
+  return out;
+}
+
 uint32_t EventSystem::disableEvent(uint32_t eventId) {
   std::lock_guard<std::mutex> lk(eventsMtx_);
   if (eventId >= events_.size())
