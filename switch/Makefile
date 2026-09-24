@@ -7,7 +7,12 @@ include $(DEVKITPRO)/libnx/switch_rules
 REAL_GAME ?= 0
 ifeq ($(REAL_GAME),1)
 TARGET := ps1recomp_game
+REAL_SPLIT_CPPFILES := $(notdir $(wildcard source/real_recompiled_part*.cpp))
+ifneq ($(strip $(REAL_SPLIT_CPPFILES)),)
+APP_CPPFILES := main_real.cpp $(REAL_SPLIT_CPPFILES) real_recompiled_dispatch.cpp
+else
 APP_CPPFILES := main_real.cpp real_recompiled.cpp
+endif
 EXTRA_OFILES :=
 else
 TARGET := ps1recomp_switch
@@ -71,13 +76,12 @@ $(OUTPUT).nro: $(OUTPUT).elf
 $(OUTPUT).elf: $(OFILES)
 
 ifeq ($(REAL_GAME),1)
-# Keep the portable runtime at -O2 for execution speed. Only the mechanically
-# generated ~4 MiB translation unit gets low-memory compiler flags. This avoids
-# cc1plus OOMs in small Codespaces without slowing GPU/CD/MDEC/runtime code.
-real_recompiled.o: CXXFLAGS += -O0 -g0 -w \
+# Keep the portable runtime at -O2 for execution speed. Only mechanically
+# generated guest-code translation units get low-memory compiler flags.
+real_recompiled.o real_recompiled_dispatch.o real_recompiled_part%.o: CXXFLAGS += -O0 -g0 -w \
 	-fno-var-tracking -fno-var-tracking-assignments \
 	-fno-unwind-tables -fno-asynchronous-unwind-tables
-real_recompiled.o: $(TOPDIR)/Makefile
+real_recompiled.o real_recompiled_dispatch.o real_recompiled_part%.o: $(TOPDIR)/Makefile
 endif
 
 ifeq ($(REAL_GAME),0)
