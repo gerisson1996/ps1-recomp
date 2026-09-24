@@ -255,6 +255,12 @@ public:
   uint32_t lastWaitEventResult() const {
     return lastWaitEventResult_.load(std::memory_order_relaxed);
   }
+  uint64_t waitEventCallCount() const {
+    return waitEventCallCount_.load(std::memory_order_relaxed);
+  }
+  uint64_t waitEventHitCount() const {
+    return waitEventHitCount_.load(std::memory_order_relaxed);
+  }
 
   /// Re-entrancy guard for `drainPendingCallbacks`.
   ///
@@ -305,6 +311,8 @@ private:
   // Most recent B0:0A WaitEvent observation, for diagnostic console.
   std::atomic<uint32_t> lastWaitEventId_{0xFFFFFFFFu};
   std::atomic<uint32_t> lastWaitEventResult_{0};
+  std::atomic<uint64_t> waitEventCallCount_{0};
+  std::atomic<uint64_t> waitEventHitCount_{0};
 
   // Pad buffer state (InitPAD / StartPAD)
   uint32_t padBuf1Addr_ = 0;
