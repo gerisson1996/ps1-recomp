@@ -70,9 +70,16 @@ jobs:
           name: ps1recomp-switch-bootstrap
           path: switch/ps1recomp_switch.nro
 
-      - name: Compile real-game harness with smoke recompiled source
+      - name: Compile real-game harness with split smoke recompiled source
         run: |
           cp switch/source/recompiled_generated.cpp switch/source/real_recompiled.cpp
+          python3 - <<'PY'
+          from pathlib import Path
+          from tools.build_switch_real import split_generated_cpp
+          split_generated_cpp(Path("switch/source/real_recompiled.cpp"), target_bytes=8 * 1024)
+          PY
+          ls switch/source/real_recompiled_part*.cpp >/dev/null
+          test -s switch/source/real_recompiled_dispatch.cpp
           make -C switch clean
           make -C switch REAL_GAME=1 -j2
           test -s switch/ps1recomp_game.nro
