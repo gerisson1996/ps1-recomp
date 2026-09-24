@@ -15,6 +15,7 @@ Prerequisites:
 from __future__ import annotations
 
 import argparse
+import hashlib
 import os
 import re
 import shutil
@@ -55,6 +56,13 @@ def apply_kernel_compat_overrides(config: Path, kernel: Path) -> None:
     payload_size = int.from_bytes(header[0x1C:0x20], "little")
 
     if (pc, load_addr, payload_size) != (0x80010B08, 0x80010000, 985088):
+        return
+
+    # Scope all game-specific compatibility changes to the exact user-provided
+    # KERNEL diagnosed on hardware. Matching only header geometry could patch
+    # a different executable that happens to share the same load layout.
+    kernel_sha256 = hashlib.sha256(kernel.read_bytes()).hexdigest()
+    if kernel_sha256 != "bd452bbf7934acb8b17c1017eaa5c30e8ef5f1ea980a7e50a2b7add7f11f8d70":
         return
 
     text = config.read_text(encoding="utf-8")
@@ -139,6 +147,29 @@ address = "0x8003776C"
     if applied:
         print("Applied KERNEL compatibility HLEs: " + ", ".join(applied), flush=True)
 
+    # Fail early if a future analyzer-format change prevents a compatibility
+    # patch from landing. This is safer than compiling an NRO that silently
+    # reintroduces the WaitEvent/VSync/DrawSync stalls.
+    final_text = config.read_text(encoding="utf-8")
+    required = (
+        ('address = "0x80019238"', 'name = "libetc_InterruptCallback4"'),
+        ('address = "0x800255F8"', 'name = "libetc_VSync"'),
+        ('address = "0x8003776C"', 'name = "libgpu_DrawSync"'),
+    )
+    for address_line, name_line in required:
+        pos = final_text.find(address_line)
+        if pos < 0:
+            raise RuntimeError(f"compat HLE missing from config: {address_line}")
+        block_start = final_text.rfind("[[hle_functions]]", 0, pos)
+        block_end = final_text.find("[[hle_functions]]", pos)
+        if block_end < 0:
+            block_end = len(final_text)
+        block = final_text[block_start:block_end]
+        if name_line not in block or "hle = true" not in block:
+            raise RuntimeError(
+                f"compat HLE did not validate for {address_line}: expected {name_line}"
+            )
+
 
 def build_host_tools(jobs: int) -> tuple[Path, Path]:
     analyzer = find_exe(HOST_BUILD / "ps1Analyzer" / "ps1Analyzer")
@@ -194,15 +225,39 @@ def main() -> int:
     kernel_arg = local_kernel.relative_to(ROOT).as_posix()
     config_arg = config.relative_to(ROOT).as_posix()
     generated_arg = GENERATED_CPP.relative_to(ROOT).as_posix()
+    generated_next = PRIVATE_BUILD / "real_recompiled.next.cpp"
+    generated_next_arg = generated_next.relative_to(ROOT).as_posix()
 
     run([str(analyzer), kernel_arg, config_arg], env=env)
     apply_kernel_compat_overrides(config, local_kernel)
-    run([str(recompiler), config_arg, generated_arg], env=env)
+    run([str(recompiler), config_arg, generated_next_arg], env=env)
 
-    if not GENERATED_CPP.is_file() or GENERATED_CPP.stat().st_size < 1024:
-        raise RuntimeError("recompiler did not generate switch/source/real_recompiled.cpp")
+    if not generated_next.is_file() or generated_next.stat().st_size < 1024:
+        raise RuntimeError("recompiler did not generate a valid real_recompiled.cpp")
 
-    print(f"Generated: {GENERATED_CPP}")
+    generated_text = generated_next.read_text(encoding="utf-8")
+    required_stubs = (
+        'psyq_dispatch("libetc_InterruptCallback4", ctx);',
+        'psyq_dispatch("libetc_VSync", ctx);',
+        'psyq_dispatch("libgpu_DrawSync", ctx);',
+    )
+    missing = [stub for stub in required_stubs if stub not in generated_text]
+    if missing:
+        raise RuntimeError(
+            "generated C++ missing required compatibility HLE stub(s): " + ", ".join(missing)
+        )
+
+    # Preserve the existing timestamp when output is byte-identical. Repeated
+    # build-helper attempts can then reuse real_recompiled.o after unrelated
+    # failures instead of recompiling the giant translation unit every time.
+    same = GENERATED_CPP.is_file() and GENERATED_CPP.read_bytes() == generated_next.read_bytes()
+    if same:
+        generated_next.unlink()
+        print(f"Generated C++ unchanged: {GENERATED_CPP}", flush=True)
+    else:
+        generated_next.replace(GENERATED_CPP)
+        print(f"Generated C++ updated: {GENERATED_CPP}", flush=True)
+
     print(f"Size: {GENERATED_CPP.stat().st_size:,} bytes")
 
     # Keep the existing object directory on repeated REAL_GAME builds.
