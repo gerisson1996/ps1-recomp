@@ -32,8 +32,8 @@ TEST(DispatchEmitter, FatalMessageNamesAddressCallerAndCause) {
   const std::string body = emitDispatchBody();
   // The whole point of failing here is that the message is actionable: the
   // address to emit, and the caller that reached it.
-  EXPECT_NE(at(body, "unmapped call to 0x{:08X}"), std::string::npos);
-  EXPECT_NE(at(body, "RA=0x{:08X}"), std::string::npos);
+  EXPECT_NE(at(body, "unmapped call to 0x%08X"), std::string::npos);
+  EXPECT_NE(at(body, "RA=0x%08X"), std::string::npos);
   EXPECT_NE(at(body, "never emitted by the recompiler"), std::string::npos);
 }
 
@@ -105,7 +105,7 @@ TEST(DispatchEmitter, NullDispatchStillReturnsQuietly) {
 TEST(DispatchEmitter, FatalMessageNamesTheIndirectSite) {
   const std::string body = emitDispatchBody();
   EXPECT_NE(at(body, "ps1LastIndirectSite()"), std::string::npos);
-  EXPECT_NE(at(body, "issued from guest site 0x{:08X}"), std::string::npos);
+  EXPECT_NE(at(body, "issued from guest site 0x%08X"), std::string::npos);
 }
 
 TEST(DispatchEmitter, FatalPathPrintsAHostStack) {
