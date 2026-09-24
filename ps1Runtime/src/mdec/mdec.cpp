@@ -115,12 +115,17 @@ uint32_t MDEC::readStatus() const {
 // DMA Interface
 
 void MDEC::dmaIn(const uint32_t *data, uint32_t wordCount) {
+  dmaInWordCount_ += wordCount;
   for (uint32_t i = 0; i < wordCount; i++) {
     writeCommand(data[i]);
   }
 }
 
-uint32_t MDEC::dmaOutRead() { return readData(); }
+uint32_t MDEC::dmaOutRead() {
+  if (!outputBuffer_.empty())
+    ++dmaOutWordCount_;
+  return readData();
+}
 
 // Command Processing
 
@@ -133,6 +138,7 @@ void MDEC::processCommand(uint32_t cmd) {
     break;
 
   case 1: // Decode macroblock(s)
+    ++decodeCommandCount_;
     currentCommand_ = cmd;
     outputDepth24_ = (cmd >> 27) & 1;
     outputSigned_ = (cmd >> 26) & 1;
@@ -415,6 +421,7 @@ void MDEC::decodeSlice() {
       }
 
       mbCount++;
+      ++macroblockCount_;
       if (kMdecDebug && mbCount <= 4)
         fmt::print("[MDEC]   macroblock {} ok\n", mbCount);
     }
