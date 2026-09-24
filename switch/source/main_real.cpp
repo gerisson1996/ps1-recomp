@@ -48,6 +48,11 @@ constexpr uint32_t SCANLINES_PER_FRAME = 263;
 // lives in PsyqState instead, so native CD boot code that waits a few VBlanks
 // can otherwise sit forever even while the host clock is advancing.
 constexpr uint32_t kNativeVsyncCounterAddr = 0x8005B2FCu;
+// Native libcd's IRQ handler writes these two bytes. CD_cw/CdSync poll them
+// directly, so the generic PsyQ atomics alone are not sufficient for this
+// KERNEL during early boot.
+constexpr uint32_t kNativeCdSyncAddr = 0x8005B6D0u;
+constexpr uint32_t kNativeCdReadyAddr = 0x8005B6D1u;
 
 struct PsxExeBootInfo {
   uint32_t pc = 0;
@@ -245,6 +250,11 @@ int main(int, char **) {
   bios.setCdromController(&cdrom);
   bios.setDma(&dma);
   bios.setGameThreadId(std::this_thread::get_id());
+  if (nativeVsyncMirror) {
+    bios.setBssMirrors(kNativeCdSyncAddr, kNativeCdReadyAddr);
+    std::printf("Native CD BSS mirror: %08X/%08X\n",
+                kNativeCdSyncAddr, kNativeCdReadyAddr);
+  }
 
   cdrom.setInterruptCallback(
       [&](uint8_t intType) { bios.queueCdromEvent(intType); });
@@ -381,7 +391,7 @@ int main(int, char **) {
           "[REAL] vsync=%u site=%08X RA=%08X SP=%08X GP=%08X\n"
           "       GPUSTAT=%08X DISP=%u,%u mode=%s\n"
           "       CD hw=%u IF=%u sector=%u mode=%02X cmd=%02X disc=%s\n"
-          "       CD sm=%u resp=%02X,%02X hleSync=%u hleReady=%u nativeVB=%u\n"
+          "       CD sm=%u resp=%02X,%02X hleSync=%u hleReady=%u nativeCD=%u,%u nativeVB=%u\n"
           "       VRAM nz=%u hash=%08X display=%s\n"
           "       MDEC dec=%llu mb=%llu in=%llu out=%llu ready=%u busy=%u\n",
           frame, ps1LastIndirectSite(), ctx.r[ps1::RA], ctx.r[ps1::SP],
@@ -396,6 +406,8 @@ int main(int, char **) {
           cdSmState, cdResp0, cdResp1,
           static_cast<unsigned>(psyqDbg.cdSyncByte.load(std::memory_order_acquire)),
           static_cast<unsigned>(psyqDbg.cdReadyByte.load(std::memory_order_acquire)),
+          nativeVsyncMirror ? static_cast<unsigned>(memory.read8(kNativeCdSyncAddr)) : 0u,
+          nativeVsyncMirror ? static_cast<unsigned>(memory.read8(kNativeCdReadyAddr)) : 0u,
           nativeVsyncMirror ? memory.read32(kNativeVsyncCounterAddr) : 0u,
           vramNonZero, vramHash, gpu.isDisplayEnabled() ? "ON" : "OFF",
           static_cast<unsigned long long>(mdec.decodeCommandCount()),
