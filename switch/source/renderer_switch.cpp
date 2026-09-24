@@ -16,11 +16,23 @@ bool RendererSwitch::init() {
   // present over the frame we just drew.
   consoleExit(nullptr);
 
-  const Result rc = framebufferCreate(&fb_, window_, 1280, 720,
-                                      PIXEL_FORMAT_RGBA_8888, 2);
-  if (R_FAILED(rc))
+  const Result createRc = framebufferCreate(&fb_, window_, 1280, 720,
+                                            PIXEL_FORMAT_RGBA_8888, 2);
+  if (R_FAILED(createRc)) {
+    // Keep diagnostic mode usable when framebuffer allocation fails.
+    consoleInit(nullptr);
+    window_ = nullptr;
     return false;
-  framebufferMakeLinear(&fb_);
+  }
+
+  const Result linearRc = framebufferMakeLinear(&fb_);
+  if (R_FAILED(linearRc)) {
+    framebufferClose(&fb_);
+    consoleInit(nullptr);
+    window_ = nullptr;
+    return false;
+  }
+
   initialized_ = true;
   return true;
 }
