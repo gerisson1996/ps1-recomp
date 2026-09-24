@@ -370,6 +370,9 @@ int main(int, char **) {
       const uint8_t cdResp0 = memory.read8(0x800596FCu);
       const uint8_t cdResp1 = memory.read8(0x800596FDu);
       auto &psyqDbg = ps1::psyq::psyq_state();
+      const uint32_t waitId = bios.lastWaitEventId();
+      const uint32_t waitResult = bios.lastWaitEventResult();
+      const auto waitDbg = bios.eventSystem().debugInfo(waitId);
 
       // Cheap once-per-second proof that the game is actually drawing or
       // uploading image data. Count non-black words across the full 1 MiB
@@ -393,7 +396,8 @@ int main(int, char **) {
           "       CD hw=%u IF=%u sector=%u mode=%02X cmd=%02X disc=%s\n"
           "       CD sm=%u resp=%02X,%02X hleSync=%u hleReady=%u nativeCD=%u,%u nativeVB=%u\n"
           "       VRAM nz=%u hash=%08X display=%s\n"
-          "       MDEC dec=%llu mb=%llu in=%llu out=%llu ready=%u busy=%u gameState=%u\n",
+          "       MDEC dec=%llu mb=%llu in=%llu out=%llu ready=%u busy=%u gameState=%u\n"
+          "       WAIT id=%u res=%u valid=%u cls=%08X spec=%08X en=%u trig=%u pend=%u\n",
           frame, ps1LastIndirectSite(), ps1LastIndirectTarget(),
           ctx.r[ps1::RA], ctx.r[ps1::SP], ctx.r[ps1::GP],
           gpu.readGPUSTAT(), dx, dy,
@@ -416,7 +420,10 @@ int main(int, char **) {
           static_cast<unsigned long long>(mdec.dmaInWordCount()),
           static_cast<unsigned long long>(mdec.dmaOutWordCount()),
           mdec.outputWordsReady(), mdec.isBusy() ? 1u : 0u,
-          static_cast<unsigned>(memory.read8(0x80062DFCu)));
+          static_cast<unsigned>(memory.read8(0x80062DFCu)),
+          waitId, waitResult, waitDbg.valid ? 1u : 0u,
+          waitDbg.classId, waitDbg.specId, waitDbg.enabled ? 1u : 0u,
+          waitDbg.triggered ? 1u : 0u, waitDbg.pendingTrigger ? 1u : 0u);
       consoleUpdate(nullptr);
     }
   };
