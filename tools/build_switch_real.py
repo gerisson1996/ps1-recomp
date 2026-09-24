@@ -224,7 +224,6 @@ def main() -> int:
     config = PRIVATE_BUILD / "kernel.toml"
     kernel_arg = local_kernel.relative_to(ROOT).as_posix()
     config_arg = config.relative_to(ROOT).as_posix()
-    generated_arg = GENERATED_CPP.relative_to(ROOT).as_posix()
     generated_next = PRIVATE_BUILD / "real_recompiled.next.cpp"
     generated_next_arg = generated_next.relative_to(ROOT).as_posix()
 
