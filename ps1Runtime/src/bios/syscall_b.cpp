@@ -27,11 +27,23 @@ void Bios::handleB0(uint32_t index) {
     ctx_.r[V0] = eventSystem_.closeEvent(ctx_.r[A0]);
     break;
   case 0x0A: { // waitEvent
-    // Drain pending callbacks (game-thread yield point)
+    // Real PS1 WaitEvent is blocking: it returns only after the descriptor has
+    // been delivered. Returning 0 immediately is TestEvent-like behaviour and
+    // lets one-shot callers run past a still-pending wait. In the cooperative
+    // Switch runtime we cannot sleep the guest thread, because that same thread
+    // owns VBlank/timer/callback progress, so block by pumping the normal safe
+    // yield path until EventSystem can consume the trigger.
     const uint32_t eventId = ctx_.r[A0];
     lastWaitEventId_.store(eventId, std::memory_order_relaxed);
-    drainPendingCallbacks();
-    const uint32_t result = eventSystem_.waitEvent(eventId);
+    waitEventCallCount_.fetch_add(1, std::memory_order_relaxed);
+
+    uint32_t result = eventSystem_.waitEvent(eventId);
+    while (result == 0) {
+      drainPendingCallbacks();
+      result = eventSystem_.waitEvent(eventId);
+    }
+
+    waitEventHitCount_.fetch_add(1, std::memory_order_relaxed);
     lastWaitEventResult_.store(result, std::memory_order_relaxed);
     ctx_.r[V0] = result;
     break;
