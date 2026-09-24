@@ -398,7 +398,9 @@ int main(int, char **) {
           "       VRAM nz=%u hash=%08X display=%s\n"
           "       MDEC dec=%llu mb=%llu in=%llu out=%llu ready=%u busy=%u gameState=%u\n"
           "       WAIT id=%u res=%u calls=%llu hits=%llu valid=%u cls=%08X spec=%08X mode=%04X handler=%08X en=%u trig=%u pend=%u\n"
-          "       INTR cb4=%08X cb5=%08X cb6=%08X\n",
+          "       INTR cb4=%08X cb5=%08X cb6=%08X\n"
+          "       STR ring=%08X/%u rd=%u wr=%u mask=%08X p1=%08X p2=%08X cb=%08X\n"
+          "       CDHLE dataCb=%08X rem=%u dst=%08X words=%u\n",
           frame, ps1LastIndirectSite(), ps1LastIndirectTarget(),
           ctx.r[ps1::RA], ctx.r[ps1::SP], ctx.r[ps1::GP],
           gpu.readGPUSTAT(), dx, dy,
@@ -429,7 +431,13 @@ int main(int, char **) {
           waitDbg.mode, waitDbg.handler, waitDbg.enabled ? 1u : 0u,
           waitDbg.triggered ? 1u : 0u, waitDbg.pendingTrigger ? 1u : 0u,
           psyqDbg.intrCallback[4], psyqDbg.intrCallback[5],
-          psyqDbg.intrCallback[6]);
+          psyqDbg.intrCallback[6],
+          memory.read32(0x80065950u), memory.read32(0x80065954u),
+          memory.read32(0x8006593Cu), memory.read32(0x80065938u),
+          memory.read32(0x80065948u), memory.read32(0x80065924u),
+          memory.read32(0x80065944u), memory.read32(0x800659A0u),
+          psyqDbg.cdDataCb, psyqDbg.cdRemaining, psyqDbg.cdDestPtr,
+          psyqDbg.cdWordCount);
       consoleUpdate(nullptr);
     }
   };
