@@ -298,6 +298,15 @@ void hle_libcd_CdSync(recomp_context *ctx) {
   ctx->r[V0] = code;
 }
 
+// Internal PsyQ CD_sync(mode, *result) has the same observable contract
+// needed by this KERNEL's native command queue. Keeping the native low-level
+// polling loop on Switch can stall even though the cooperative CD state has
+// already reached Complete. Route it through the same synchronized HLE used
+// by the public CdSync wrapper.
+void hle_libcd_CD_sync(recomp_context *ctx) {
+  hle_libcd_CdSync(ctx);
+}
+
 // CdReady(mode, *result)
 //
 // Same shape as CdSync but for data-ready (INT1/INT4) interrupts.  Phase 2.3
@@ -507,6 +516,7 @@ void psyq_register_libcd() {
   psyq_register("libcd_CdInit",          &hle_libcd_CdInit);
   psyq_register("libcd_CdRead",          &hle_libcd_CdRead);
   psyq_register("libcd_CdSync",          &hle_libcd_CdSync);
+  psyq_register("libcd_CD_sync",          &hle_libcd_CD_sync);
   psyq_register("libcd_CdReady",         &hle_libcd_CdReady);
   psyq_register("libcd_CdReadSync",      &hle_libcd_CdReadSync);
   psyq_register("libcd_CdControl",       &hle_libcd_CdControl);
