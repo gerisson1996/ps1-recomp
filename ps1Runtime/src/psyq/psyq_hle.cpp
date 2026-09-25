@@ -38,10 +38,16 @@ void applyRootCounterTicks(recomp_context *ctx, uint32_t vblanks) {
 
 // VSync
 //
-// PsyQ VSync(n):
-//   n == 0 -> sync to next VBlank (wait for counter to change)
-//   n  > 0 -> wait until n more VBlanks have elapsed
-//   Returns the total VBlank counter value.
+// PsyQ VSync(n), matching the native libetc body in the diagnosed KERNEL:
+//   n < 0  -> query total VBlank counter immediately (VSync(-1))
+//   n == 0 -> sync to next VBlank
+//   n == 1 -> non-blocking sub-frame timing query
+//   n > 1  -> wait until n more VBlanks have elapsed
+//
+// The native n==1 path returns a 16-bit timer delta. This runtime does not yet
+// model that libetc sub-frame timer, so return 0 rather than incorrectly
+// sleeping for a whole frame. The critical n==-1 path is used by native CD
+// timeout code and must never advance/pump VBlank as a side effect.
 //
 // Reads psyq_state().vsyncCounter, the C++-side singleton incremented by
 // the host VBlank thread (~60 Hz, ~16.6 ms period).  Each iteration:
@@ -60,10 +66,27 @@ void applyRootCounterTicks(recomp_context *ctx, uint32_t vblanks) {
 // cannot drain the same VBlank twice.
 //
 void hle_VSync(recomp_context *ctx) {
-  int32_t n = static_cast<int32_t>(ctx->r[A0]);
-  uint32_t frames = (n <= 0) ? 1u : static_cast<uint32_t>(n);
-
+  const int32_t n = static_cast<int32_t>(ctx->r[A0]);
   auto &counter = psyq_state().vsyncCounter;
+
+  // Native VSync(-1) is a pure counter query. In particular, libcd calls it
+  // repeatedly while polling command completion; treating it as VSync(0)
+  // stretches every poll by a full video frame and can make CD init appear
+  // permanently stuck.
+  if (n < 0) {
+    ctx->r[V0] = counter.load(std::memory_order_acquire);
+    return;
+  }
+
+  // Native VSync(1) is also non-blocking: it reports a sub-frame timer delta.
+  // Until that timer is modeled, zero is a much closer approximation than
+  // waiting one VBlank.
+  if (n == 1) {
+    ctx->r[V0] = 0;
+    return;
+  }
+
+  const uint32_t frames = (n == 0) ? 1u : static_cast<uint32_t>(n);
   uint32_t start = counter.load(std::memory_order_acquire);
   uint32_t target = start + frames;
   auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(1);
