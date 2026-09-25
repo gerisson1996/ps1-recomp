@@ -378,6 +378,35 @@ int main(int, char **) {
       const auto waitDbg = bios.eventSystem().debugInfo(waitId);
       const auto threadDbg = bios.guestThreadMetrics();
 
+      // Native KERNEL CD command queue. q1 is the producer/head and q2 the
+      // consumer/tail. When q1 != q2 the startup path waits for this ring to
+      // drain before it can continue toward STR/MDEC setup. Decode the current
+      // tail entry without mutating guest state so hardware photos tell us
+      // exactly which CD operation is still pending.
+      const uint16_t pollQ0 = memory.read16(0x80062EFCu);
+      const uint16_t pollQ1 = memory.read16(0x80062EFEu);
+      const uint16_t pollQ2 = memory.read16(0x80062F02u);
+      const uint32_t pollRingBase = memory.read32(0x80062D74u);
+      uint32_t pollEntryAddr = 0;
+      int32_t pollEntryType = -32768;
+      uint32_t pollEntry4 = 0;
+      uint32_t pollEntry8 = 0;
+      uint32_t pollEntryC = 0;
+      if (pollQ2 <= pollQ0 &&
+          pollRingBase >= 0x80000000u && pollRingBase < 0x80200000u) {
+        pollEntryAddr = pollRingBase + static_cast<uint32_t>(pollQ2) * 16u;
+        if (pollEntryAddr >= 0x80000000u && pollEntryAddr <= 0x801FFFF0u) {
+          pollEntryType = static_cast<int16_t>(memory.read16(pollEntryAddr + 0u));
+          pollEntry4 = memory.read32(pollEntryAddr + 4u);
+          pollEntry8 = memory.read32(pollEntryAddr + 8u);
+          pollEntryC = memory.read32(pollEntryAddr + 12u);
+        }
+      }
+      const uint32_t pollPending =
+          (pollQ1 >= pollQ2)
+              ? static_cast<uint32_t>(pollQ1 - pollQ2)
+              : static_cast<uint32_t>(pollQ0 + 1u - pollQ2 + pollQ1);
+
       // Cheap once-per-second proof that the game is actually drawing or
       // uploading image data. Count non-black words across the full 1 MiB
       // VRAM snapshot and keep a small rolling hash so changes are visible
@@ -407,7 +436,8 @@ int main(int, char **) {
           "       THR open=%llu close=%llu change=%llu run=%llu id=%08X entry=%08X\n"
           "       STR ring=%08X/%u rd=%u wr=%u mask=%08X p1=%08X p2=%08X cb=%08X\n"
           "       CDHLE dataCb=%08X rem=%u dst=%08X words=%u\n"
-          "       POLL q0=%u q1=%u q2=%u cb=%08X\n",
+          "       POLL q0=%u q1=%u q2=%u pending=%u cb=%08X\n"
+          "       CDQ base=%08X entry=%08X type=%d a4=%08X a8=%08X aC=%08X\n",
           frame, ps1LastIndirectSite(), ps1LastIndirectTarget(),
           ctx.r[ps1::RA], ctx.r[ps1::SP], ctx.r[ps1::GP],
           ctx.r[ps1::T1], ctx.r[ps1::A0], ctx.r[ps1::A1],
@@ -452,10 +482,13 @@ int main(int, char **) {
           memory.read32(0x80065944u), memory.read32(0x800659A0u),
           psyqDbg.cdDataCb, psyqDbg.cdRemaining, psyqDbg.cdDestPtr,
           psyqDbg.cdWordCount,
-          static_cast<unsigned>(memory.read16(0x80062EFCu)),
-          static_cast<unsigned>(memory.read16(0x80062EFEu)),
-          static_cast<unsigned>(memory.read16(0x80062F02u)),
-          memory.read32(0x80062F2Cu));
+          static_cast<unsigned>(pollQ0),
+          static_cast<unsigned>(pollQ1),
+          static_cast<unsigned>(pollQ2),
+          pollPending,
+          memory.read32(0x80062F2Cu),
+          pollRingBase, pollEntryAddr, pollEntryType,
+          pollEntry4, pollEntry8, pollEntryC);
       consoleUpdate(nullptr);
     }
   };
