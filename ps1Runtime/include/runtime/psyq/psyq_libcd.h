@@ -33,6 +33,10 @@ void hle_libcd_CdRead(recomp_context *ctx);
 /// completion.  Returns the libcd response code (CdlComplete=2 on success).
 void hle_libcd_CdSync(recomp_context *ctx);
 
+/// Internal PsyQ CD_sync(mode, *result) used by native libcd queue code.
+/// Unlike the public wrapper, it preserves an already-completed sync byte.
+void hle_libcd_CD_sync(recomp_context *ctx);
+
 /// CdReady(mode, *result) -- wait (mode=0) or poll (mode=1) for sector data.
 /// Returns the libcd response code (CdlDataReady=1 / CdlDataEnd=4 / etc.).
 void hle_libcd_CdReady(recomp_context *ctx);
