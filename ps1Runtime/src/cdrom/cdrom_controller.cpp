@@ -51,6 +51,7 @@ void CdromController::reset() {
   sectorBuffer_.fill(0);
   sectorSize_ = 2048;
   sectorReady_ = false;
+  sectorReadOffset_ = 0;
   cyclesUntilResponse_ = 0;
   cyclesPerSector_ = 33868800 / 75; // ~451584 cycles per sector at 1x
   readCycleCounter_ = 0;
@@ -246,6 +247,10 @@ void CdromController::ackInterrupt(uint8_t val) {
 void CdromController::clearWaitingForAck() {
   std::lock_guard<std::recursive_mutex> lk(mtx_);
   waitingForAck_ = false;
+  // ACK means the guest finished handling this sector. Any unread tail of the
+  // 2340-byte FIFO is discarded before the next sector replaces the buffer.
+  sectorReady_ = false;
+  sectorReadOffset_ = 0;
 }
 
 // Tick
@@ -257,11 +262,24 @@ uint32_t CdromController::takeSectorPayload(uint8_t *dst, uint32_t maxBytes) {
   std::lock_guard<std::recursive_mutex> lk(mtx_);
   if (!sectorReady_ || dst == nullptr || maxBytes == 0)
     return 0;
+
   const uint32_t dataOff = (sectorSize_ == 2048) ? 24u : 12u;
-  const uint32_t avail = SECTOR_SIZE_RAW - dataOff;
-  const uint32_t n = std::min(maxBytes, avail);
-  std::memcpy(dst, sectorBuffer_.data() + dataOff, n);
-  sectorReady_ = false;
+  const uint32_t payloadBytes = SECTOR_SIZE_RAW - dataOff;
+  if (sectorReadOffset_ >= payloadBytes) {
+    sectorReady_ = false;
+    sectorReadOffset_ = 0;
+    return 0;
+  }
+
+  const uint32_t remain = payloadBytes - sectorReadOffset_;
+  const uint32_t n = std::min(maxBytes, remain);
+  std::memcpy(dst, sectorBuffer_.data() + dataOff + sectorReadOffset_, n);
+  sectorReadOffset_ += n;
+
+  if (sectorReadOffset_ >= payloadBytes) {
+    sectorReady_ = false;
+    sectorReadOffset_ = 0;
+  }
   return n;
 }
 
@@ -305,6 +323,7 @@ void CdromController::tick(uint32_t cycles) {
         if (sector) {
           std::memcpy(sectorBuffer_.data(), sector->raw,
                       std::min<size_t>(SECTOR_SIZE_RAW, 2352));
+          sectorReadOffset_ = 0;
           sectorReady_ = true;
 
           // Determine data size based on mode
