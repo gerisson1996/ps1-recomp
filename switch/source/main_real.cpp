@@ -406,7 +406,8 @@ int main(int, char **) {
           "       INTR cb4=%08X cb5=%08X cb6=%08X\n"
           "       THR open=%llu close=%llu change=%llu run=%llu id=%08X entry=%08X\n"
           "       STR ring=%08X/%u rd=%u wr=%u mask=%08X p1=%08X p2=%08X cb=%08X\n"
-          "       CDHLE dataCb=%08X rem=%u dst=%08X words=%u\n",
+          "       CDHLE dataCb=%08X rem=%u dst=%08X words=%u\n"
+          "       POLL q0=%u q1=%u q2=%u cb=%08X\n",
           frame, ps1LastIndirectSite(), ps1LastIndirectTarget(),
           ctx.r[ps1::RA], ctx.r[ps1::SP], ctx.r[ps1::GP],
           ctx.r[ps1::T1], ctx.r[ps1::A0], ctx.r[ps1::A1],
@@ -450,7 +451,11 @@ int main(int, char **) {
           memory.read32(0x80065948u), memory.read32(0x80065924u),
           memory.read32(0x80065944u), memory.read32(0x800659A0u),
           psyqDbg.cdDataCb, psyqDbg.cdRemaining, psyqDbg.cdDestPtr,
-          psyqDbg.cdWordCount);
+          psyqDbg.cdWordCount,
+          static_cast<unsigned>(memory.read16(0x80062EFCu)),
+          static_cast<unsigned>(memory.read16(0x80062EFEu)),
+          static_cast<unsigned>(memory.read16(0x80062F02u)),
+          memory.read32(0x80062F2Cu));
       consoleUpdate(nullptr);
     }
   };
