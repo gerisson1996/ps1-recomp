@@ -104,12 +104,10 @@ TEST_F(CdromControllerTest, BcdConversion) {
 
 // Sector hand-off
 //
-// `tick` runs on the render thread and memcpy's the next sector over the
-// controller's buffer.  A consumer that held the `getSectorBuffer` pointer and
-// read it word by word could therefore splice two sectors together, which in
-// Crash produced a corrupt NSF page and sent the LZ decompressor past the end
-// of its output buffer.  `takeSectorPayload` copies and clears in one locked
-// step so a consumer always sees exactly one sector.
+// `tick` can replace the controller's sector buffer while consumers are
+// active, so callers copy through `takeSectorPayload` under the controller
+// lock. A PS1 sector may be consumed by more than one DMA burst, therefore the
+// controller also keeps a read cursor until the current INT1 is acknowledged.
 
 namespace {
 // Serves sector N filled with the byte N, so a spliced read is visible as a
@@ -163,14 +161,30 @@ TEST_F(CdromControllerTest, TakeSectorPayloadCopiesUserDataAndConsumesTheSector)
   EXPECT_EQ(cdrom.takeSectorPayload(payload.data(), payload.size()), 0u);
 }
 
-TEST_F(CdromControllerTest, TakeSectorPayloadHonoursTheDestinationSize) {
+TEST_F(CdromControllerTest, TakeSectorPayloadSupportsMultipleReadsOfOneSector) {
   CountingFs fs;
   cdrom.attachVirtualFs(&fs);
   readOneSector(cdrom);
   ASSERT_TRUE(cdrom.hasSectorReady());
 
-  uint8_t small[64];
-  std::memset(small, 0, sizeof small);
-  EXPECT_EQ(cdrom.takeSectorPayload(small, sizeof small), sizeof small);
+  uint8_t first[12] = {};
+  uint8_t second[64] = {};
+  EXPECT_EQ(cdrom.takeSectorPayload(first, sizeof first), sizeof first);
+  EXPECT_TRUE(cdrom.hasSectorReady())
+      << "a short DMA must not discard the rest of the current sector";
+  EXPECT_EQ(cdrom.takeSectorPayload(second, sizeof second), sizeof second);
+  EXPECT_TRUE(cdrom.hasSectorReady());
+
+  // CountingFs fills every byte identically, but two successful reads prove
+  // the payload cursor remained live across DMA bursts.
+  for (uint8_t b : first)
+    EXPECT_EQ(b, first[0]);
+  for (uint8_t b : second)
+    EXPECT_EQ(b, first[0]);
+
+  // The BIOS acknowledges INT1 after the callback has finished. That releases
+  // any unread tail so the next sector can replace the buffer.
+  cdrom.clearWaitingForAck();
   EXPECT_FALSE(cdrom.hasSectorReady());
+  EXPECT_EQ(cdrom.takeSectorPayload(second, sizeof second), 0u);
 }
