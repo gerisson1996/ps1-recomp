@@ -66,6 +66,102 @@ void Bios::handleB0(uint32_t index) {
   case 0x0D: // disableEvent
     ctx_.r[V0] = eventSystem_.disableEvent(ctx_.r[A0]);
     break;
+  case 0x0E: { // OpenThread(entry, sp, gp)
+    ++guestThreadOpenCount_;
+    uint32_t id = 0;
+    for (std::size_t i = 1; i < guestThreads_.size(); ++i) {
+      auto &slot = guestThreads_[i];
+      if (slot.open)
+        continue;
+      slot.open = true;
+      slot.id = 0xFF000000u | static_cast<uint32_t>(i);
+      slot.entry = ctx_.r[A0];
+      slot.sp = ctx_.r[A1];
+      slot.gp = ctx_.r[A2];
+      id = slot.id;
+      lastGuestThreadId_ = id;
+      lastGuestThreadEntry_ = slot.entry;
+      break;
+    }
+    ctx_.r[V0] = id;
+    BIOS_LOG("[BIOS] OpenThread(entry=0x{:08X}, sp=0x{:08X}, gp=0x{:08X}) -> 0x{:08X}\n",
+             ctx_.r[A0], ctx_.r[A1], ctx_.r[A2], id);
+    break;
+  }
+  case 0x0F: { // CloseThread(id)
+    ++guestThreadCloseCount_;
+    const uint32_t id = ctx_.r[A0];
+    const uint32_t index = id & 0xFFu;
+    uint32_t ok = 0;
+    if ((id & 0xFFFFFF00u) == 0xFF000000u &&
+        index < guestThreads_.size() && index != 0) {
+      auto &slot = guestThreads_[index];
+      if (slot.open && slot.id == id) {
+        slot.open = false;
+        ok = 1;
+      }
+    }
+    lastGuestThreadId_ = id;
+    ctx_.r[V0] = ok;
+    break;
+  }
+  case 0x10: { // ChangeThread(id)
+    ++guestThreadChangeCount_;
+    const uint32_t id = ctx_.r[A0];
+    lastGuestThreadId_ = id;
+
+    // Main thread is represented by 0xFF000000 in this BIOS family. When a
+    // worker reaches ChangeThread(main), treat it as a cooperative yield hint:
+    // the worker continues to its natural return, where the outer bridge
+    // restores the main CPU context.
+    if (id == 0xFF000000u) {
+      ctx_.r[V0] = 1;
+      break;
+    }
+
+    const uint32_t index = id & 0xFFu;
+    if ((id & 0xFFFFFF00u) != 0xFF000000u ||
+        index >= guestThreads_.size() || index == 0) {
+      ctx_.r[V0] = 0;
+      break;
+    }
+
+    auto &slot = guestThreads_[index];
+    if (!slot.open || slot.id != id || !guestThreadDispatcher_) {
+      ctx_.r[V0] = 0;
+      break;
+    }
+
+    // Avoid recursively switching workers from inside a worker. The early
+    // KERNEL workers only switch back to the main thread; if a later title
+    // needs worker->worker scheduling this bridge should be upgraded to a
+    // resumable TCB scheduler rather than recursing C++ call stacks.
+    if (guestThreadDispatchActive_) {
+      ctx_.r[V0] = 1;
+      break;
+    }
+
+    ps1::CPUContext caller = static_cast<ps1::CPUContext &>(ctx_);
+    const uint32_t callerId = currentGuestThreadId_;
+
+    ctx_.reset();
+    ctx_.r[SP] = slot.sp;
+    ctx_.r[GP] = slot.gp;
+    ctx_.r[RA] = 0;
+    ctx_.pc = slot.entry;
+
+    guestThreadDispatchActive_ = true;
+    currentGuestThreadId_ = id;
+    ++guestThreadRunCount_;
+    lastGuestThreadEntry_ = slot.entry;
+    guestThreadDispatcher_(slot.entry);
+    currentGuestThreadId_ = callerId;
+    guestThreadDispatchActive_ = false;
+
+    static_cast<ps1::CPUContext &>(ctx_) = caller;
+    ctx_.r[V0] = 1;
+    break;
+  }
   case 0x12: { // InitPAD -- store pad buffer addresses for VBlank polling
     padBuf1Addr_ = ctx_.r[A0];
     padBuf1Size_ = ctx_.r[A1];
