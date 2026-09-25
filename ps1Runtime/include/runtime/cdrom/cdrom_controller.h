@@ -94,9 +94,11 @@ public:
   // Call this AFTER the game's data callback has DMA-copied the current sector.
   void clearWaitingForAck();
 
-  // Copy the ready sector's user-data payload out and clear the ready flag,
-  // both under the lock, so the render thread cannot drop the next sector on
-  // top of a half-read one.  This is the only safe way to consume a sector.
+  // Copy up to maxBytes from the current sector payload, advancing a cursor.
+  // A single PS1 sector can be read in multiple DMA bursts (for example this
+  // KERNEL reads 3 header words, then 0x200 data words from the same INT1).
+  // Keep the sector ready until the payload is exhausted or the interrupt is
+  // acknowledged, so a short first DMA does not discard the rest of the sector.
   // Returns the number of bytes written to `dst`, or 0 if none was ready.
   uint32_t takeSectorPayload(uint8_t *dst, uint32_t maxBytes);
 
@@ -206,6 +208,7 @@ private:
   std::array<uint8_t, 2352> sectorBuffer_;
   uint32_t sectorSize_ = 2048;
   bool sectorReady_ = false;
+  uint32_t sectorReadOffset_ = 0; // bytes consumed from current payload
 
   // Timing
   uint32_t cyclesUntilResponse_ = 0;
