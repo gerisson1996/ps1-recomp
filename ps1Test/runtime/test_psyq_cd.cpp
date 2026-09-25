@@ -336,6 +336,32 @@ TEST_F(PsyqCdTest, CdSyncFillsResultStructWhenProvided) {
     EXPECT_EQ(mem.read8(resultPtr + i), 0u) << "byte " << i;
 }
 
+TEST_F(PsyqCdTest, InternalCdSyncPreservesAlreadyCompletedState) {
+  // Native CD_sync first observes the current sync byte. It must not clear an
+  // already-completed command and wait for an unrelated future IRQ.
+  int drains = 0;
+  HleConfig cfg{};
+  cfg.drainCallbacks = [&] {
+    ++drains;
+    psyq::psyq_state().cdSyncByte.store(5);
+  };
+  configure(cfg);
+
+  psyq::psyq_state().cdSyncByte.store(2); // command already Complete
+  const uint32_t resultPtr = 0x80100120u;
+  ctx.r[A0] = 0; // blocking mode
+  ctx.r[A1] = resultPtr;
+
+  hle_libcd_CD_sync(&ctx);
+
+  EXPECT_EQ(ctx.r[V0], 2u);
+  EXPECT_EQ(mem.read8(resultPtr), 2u);
+  EXPECT_EQ(drains, 0) << "completed CD_sync must return without waiting";
+
+  HleConfig empty{};
+  configure(empty);
+}
+
 TEST_F(PsyqCdTest, CdReadyPollReturnsAtomicValue) {
   HleConfig cfg{};
   configure(cfg);
