@@ -396,6 +396,7 @@ int main(int, char **) {
 
       std::printf(
           "[REAL] vsync=%u site=%08X->%08X RA=%08X SP=%08X GP=%08X\n"
+          "       BIOSREG T1=%08X A0=%08X A1=%08X A2=%08X V0=%08X\n"
           "       GPUSTAT=%08X DISP=%u,%u mode=%s\n"
           "       CD hw=%u IF=%u sector=%u mode=%02X cmd=%02X disc=%s\n"
           "       CD sm=%u resp=%02X,%02X hleSync=%u hleReady=%u nativeCD=%u,%u nativeVB=%u\n"
@@ -408,6 +409,8 @@ int main(int, char **) {
           "       CDHLE dataCb=%08X rem=%u dst=%08X words=%u\n",
           frame, ps1LastIndirectSite(), ps1LastIndirectTarget(),
           ctx.r[ps1::RA], ctx.r[ps1::SP], ctx.r[ps1::GP],
+          ctx.r[ps1::T1], ctx.r[ps1::A0], ctx.r[ps1::A1],
+          ctx.r[ps1::A2], ctx.r[ps1::V0],
           gpu.readGPUSTAT(), dx, dy,
           gpu.isDisplayModeSet() ? "SET" : "DEFAULT",
           static_cast<unsigned>(cdrom.getState()),
