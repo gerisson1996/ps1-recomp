@@ -53,6 +53,12 @@ constexpr uint32_t kNativeVsyncCounterAddr = 0x8005B2FCu;
 // KERNEL during early boot.
 constexpr uint32_t kNativeCdSyncAddr = 0x8005B6D0u;
 constexpr uint32_t kNativeCdReadyAddr = 0x8005B6D1u;
+// The native libcd callback setters at 0x800265BC/0x800265D0 store their
+// function pointers here. Because we HLE the BIOS/CD interrupt chain, the
+// runtime must mirror these native registrations into PsyqState before INT1/
+// INT2 delivery or the game's sector-completion callback never runs.
+constexpr uint32_t kNativeCdNotifyCbAddr = 0x8005B3F4u;
+constexpr uint32_t kNativeCdDataCbAddr = 0x8005B3F8u;
 
 struct PsxExeBootInfo {
   uint32_t pc = 0;
@@ -299,6 +305,16 @@ int main(int, char **) {
       cleanExit(renderer);
     mapPad(input, held);
 
+    // Bridge this KERNEL's native libcd callback registration into the HLE
+    // interrupt path. The type-2 CD queue installs 0x80016C54 through the
+    // native setter at 0x800265D0; without this mirror INT1 is acknowledged
+    // but the callback that decrements the queue's sector count is never run.
+    if (nativeVsyncMirror) {
+      auto &cdState = ps1::psyq::psyq_state();
+      cdState.cdNotifyCb = memory.read32(kNativeCdNotifyCbAddr);
+      cdState.cdDataCb = memory.read32(kNativeCdDataCbAddr);
+    }
+
     cdrom.tick(CYCLES_PER_FRAME);
 
     uint32_t timerIrqs = 0;
@@ -435,7 +451,7 @@ int main(int, char **) {
           "       INTR cb4=%08X cb5=%08X cb6=%08X\n"
           "       THR open=%llu close=%llu change=%llu run=%llu id=%08X entry=%08X\n"
           "       STR ring=%08X/%u rd=%u wr=%u mask=%08X p1=%08X p2=%08X cb=%08X\n"
-          "       CDHLE dataCb=%08X rem=%u dst=%08X words=%u\n"
+          "       CDHLE dataCb=%08X notify=%08X native=%08X/%08X rem=%u dst=%08X words=%u\n"
           "       POLL q0=%u q1=%u q2=%u pending=%u cb=%08X\n"
           "       CDQ base=%08X entry=%08X type=%d a4=%08X a8=%08X aC=%08X\n",
           frame, ps1LastIndirectSite(), ps1LastIndirectTarget(),
@@ -480,8 +496,10 @@ int main(int, char **) {
           memory.read32(0x8006593Cu), memory.read32(0x80065938u),
           memory.read32(0x80065948u), memory.read32(0x80065924u),
           memory.read32(0x80065944u), memory.read32(0x800659A0u),
-          psyqDbg.cdDataCb, psyqDbg.cdRemaining, psyqDbg.cdDestPtr,
-          psyqDbg.cdWordCount,
+          psyqDbg.cdDataCb, psyqDbg.cdNotifyCb,
+          nativeVsyncMirror ? memory.read32(kNativeCdDataCbAddr) : 0u,
+          nativeVsyncMirror ? memory.read32(kNativeCdNotifyCbAddr) : 0u,
+          psyqDbg.cdRemaining, psyqDbg.cdDestPtr, psyqDbg.cdWordCount,
           static_cast<unsigned>(pollQ0),
           static_cast<unsigned>(pollQ1),
           static_cast<unsigned>(pollQ2),
