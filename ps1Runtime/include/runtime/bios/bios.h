@@ -21,6 +21,7 @@
 #include "runtime/cdrom/virtual_fs.h"
 #include "runtime/cpu_context.h"
 #include "runtime/memory.h"
+#include <array>
 #include <atomic>
 #include <cstdint>
 #include <cstdlib>
@@ -296,6 +297,32 @@ public:
   // / hle_libcd_CdSync.
   void setGameThreadId(std::thread::id id) { gameThreadId_ = id; }
 
+  // Cooperative guest-thread bridge used by static-recompilation harnesses.
+  // B0:0E/0F/10 are PS1 OpenThread/CloseThread/ChangeThread. A normal native
+  // call stack cannot be suspended at an arbitrary guest ChangeThread, so the
+  // bridge runs a selected worker entry to its next natural return while
+  // nested ChangeThread(main) acts as a yield hint. This is sufficient for
+  // early-boot worker functions that explicitly save their continuation before
+  // yielding; callers that need full preemptive TCB semantics can leave the
+  // dispatcher unset and provide a richer scheduler later.
+  void setGuestThreadDispatcher(std::function<void(uint32_t)> dispatcher) {
+    guestThreadDispatcher_ = std::move(dispatcher);
+  }
+
+  struct GuestThreadMetrics {
+    uint64_t opens = 0;
+    uint64_t closes = 0;
+    uint64_t changes = 0;
+    uint64_t runs = 0;
+    uint32_t lastId = 0;
+    uint32_t lastEntry = 0;
+  };
+  GuestThreadMetrics guestThreadMetrics() const {
+    return {guestThreadOpenCount_, guestThreadCloseCount_,
+            guestThreadChangeCount_, guestThreadRunCount_,
+            lastGuestThreadId_, lastGuestThreadEntry_};
+  }
+
 private:
   recomp_context &ctx_;
   Heap heap_;
@@ -325,6 +352,24 @@ private:
   // 0 = disabled (HLE-only games leave them unset).
   uint32_t cdSyncMirror_ = 0;
   uint32_t cdReadyMirror_ = 0;
+
+  struct GuestThreadSlot {
+    bool open = false;
+    uint32_t id = 0;
+    uint32_t entry = 0;
+    uint32_t sp = 0;
+    uint32_t gp = 0;
+  };
+  std::array<GuestThreadSlot, 8> guestThreads_{};
+  std::function<void(uint32_t)> guestThreadDispatcher_{};
+  bool guestThreadDispatchActive_ = false;
+  uint32_t currentGuestThreadId_ = 0xFF000000u;
+  uint64_t guestThreadOpenCount_ = 0;
+  uint64_t guestThreadCloseCount_ = 0;
+  uint64_t guestThreadChangeCount_ = 0;
+  uint64_t guestThreadRunCount_ = 0;
+  uint32_t lastGuestThreadId_ = 0;
+  uint32_t lastGuestThreadEntry_ = 0;
 
   // Game thread identity for inline-drain optimisation in queueCdromEvent.
   // Default-constructed id never matches any real thread, so before
