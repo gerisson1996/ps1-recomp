@@ -74,8 +74,10 @@ void applyRootCounterTicks(recomp_context *ctx, uint32_t vblanks);
 
 // PsyQ SDK HLE implementations
 
-/// VSync(n) -- wait for n vertical blanks then return the total VBlank count.
-/// When n == 0, just drains pending callbacks and returns the current count.
+/// VSync(n) -- PsyQ vertical-sync/timing service.
+/// n < 0 queries the total VBlank count without blocking; n == 1 is the
+/// non-blocking sub-frame timing query; n == 0 waits for the next VBlank;
+/// n > 1 waits for that many VBlanks.
 void hle_VSync(recomp_context *ctx);
 
 /// DrawSync(mode) -- wait for GPU drawing to complete.
