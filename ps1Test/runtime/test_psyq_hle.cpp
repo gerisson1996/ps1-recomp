@@ -110,12 +110,22 @@ TEST_F(PsyqHleTest, ResetGraphWithoutAnEnvAddressWritesNothing) {
 
 // VSync
 
-TEST_F(PsyqHleTest, VSyncWaitsOneFrame) {
+TEST_F(PsyqHleTest, VSyncNegativeQueriesCounterWithoutWaiting) {
+    psyq_state().vsyncCounter.store(77, std::memory_order_release);
+    ctx.r[A0] = 0xFFFFFFFFu; // VSync(-1)
+    hle_VSync(&ctx);
+    EXPECT_EQ(drainCalls, 0);
+    EXPECT_EQ(ctx.r[V0], 77u);
+    EXPECT_EQ(psyq_state().vsyncCounter.load(), 77u);
+}
+
+TEST_F(PsyqHleTest, VSyncOneIsNonBlockingTimingQuery) {
+    psyq_state().vsyncCounter.store(77, std::memory_order_release);
     ctx.r[A0] = 1;
     hle_VSync(&ctx);
-    EXPECT_GE(drainCalls, 1);
-    EXPECT_EQ(ctx.r[V0], psyq_state().vsyncCounter.load());
-    EXPECT_GE(psyq_state().vsyncCounter.load(), 1u);
+    EXPECT_EQ(drainCalls, 0);
+    EXPECT_EQ(ctx.r[V0], 0u); // sub-frame timer not modeled yet
+    EXPECT_EQ(psyq_state().vsyncCounter.load(), 77u);
 }
 
 TEST_F(PsyqHleTest, VSyncWaitsMultipleFrames) {
@@ -159,18 +169,18 @@ TEST_F(PsyqHleTest, VBlankPendingDeliveredOncePerFlagRaise) {
     psyq_state().vsyncCounter.store(0, std::memory_order_release);
     psyq_state().vblankPending.store(true, std::memory_order_release);
 
-    // First hle_VSync(1) drains the flag and fires delivery once.
-    ctx.r[A0] = 1;
+    // First hle_VSync(0) drains the flag and fires delivery once.
+    ctx.r[A0] = 0;
     hle_VSync(&ctx);
     EXPECT_EQ(vblankDeliveries, 1);
     EXPECT_FALSE(psyq_state().vblankPending.load(std::memory_order_acquire));
 
-    // Second hle_VSync(1) -- no new VBlank thread tick happened, so the
+    // Second hle_VSync(0) -- no new VBlank thread tick happened, so the
     // flag must remain false and delivery count must NOT increment.
     // The drainCallbacks fixture-hook still bumps the counter inside the
     // wait loop so the call returns; only the deliverVBlankEvent path is
     // exercised here.
-    ctx.r[A0] = 1;
+    ctx.r[A0] = 0;
     hle_VSync(&ctx);
     EXPECT_EQ(vblankDeliveries, 1)
         << "Same VBlank delivered twice across consecutive hle_VSync calls";
@@ -179,7 +189,7 @@ TEST_F(PsyqHleTest, VBlankPendingDeliveredOncePerFlagRaise) {
     // Re-raise the flag (simulates the next VBlank thread tick) and
     // confirm a third call now delivers a fresh VBlank.
     psyq_state().vblankPending.store(true, std::memory_order_release);
-    ctx.r[A0] = 1;
+    ctx.r[A0] = 0;
     hle_VSync(&ctx);
     EXPECT_EQ(vblankDeliveries, 2);
     EXPECT_FALSE(psyq_state().vblankPending.load(std::memory_order_acquire));
@@ -196,7 +206,7 @@ TEST_F(PsyqHleTest, VSyncSkipsDeliveryWhenFlagNeverRaised) {
     // Flag stays false throughout.
     EXPECT_FALSE(psyq_state().vblankPending.load(std::memory_order_acquire));
 
-    ctx.r[A0] = 1;
+    ctx.r[A0] = 0;
     hle_VSync(&ctx);
     EXPECT_EQ(vblankDeliveries, 0);
 }
