@@ -223,8 +223,12 @@ void DMA::executeBlockTransfer(uint32_t ch) {
 #ifndef PS1_SWITCH_GPU_DMA_TEST
   std::array<uint8_t, ps1::cdrom::SECTOR_SIZE_RAW> payload{};
   uint32_t payloadBytes = 0;
-  if (ch == CDROM_CH && !fromRam && cdrom_)
-    payloadBytes = cdrom_->takeSectorPayload(payload.data(), payload.size());
+  if (ch == CDROM_CH && !fromRam && cdrom_) {
+    const uint64_t requested = static_cast<uint64_t>(totalWords) * 4u;
+    const uint32_t bytesToTake =
+        static_cast<uint32_t>(std::min<uint64_t>(requested, payload.size()));
+    payloadBytes = cdrom_->takeSectorPayload(payload.data(), bytesToTake);
+  }
 #endif
 
   for (uint32_t i = 0; i < totalWords; i++) {
