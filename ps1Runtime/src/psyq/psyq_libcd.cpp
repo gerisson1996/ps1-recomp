@@ -298,13 +298,51 @@ void hle_libcd_CdSync(recomp_context *ctx) {
   ctx->r[V0] = code;
 }
 
-// Internal PsyQ CD_sync(mode, *result) has the same observable contract
-// needed by this KERNEL's native command queue. Keeping the native low-level
-// polling loop on Switch can stall even though the cooperative CD state has
-// already reached Complete. Route it through the same synchronized HLE used
-// by the public CdSync wrapper.
+// Internal PsyQ CD_sync(mode, *result) used by this KERNEL's native command
+// queue. Its native implementation does NOT clear the sync byte on entry: it
+// first observes the completion (2) / error (5) already produced by the
+// command IRQ, and only keeps pumping while the byte is still pending.
+//
+// Do not route this through public CdSync(mode=0): that helper intentionally
+// resets cdSyncByte to wait for the *next* event. Hardware bring-up showed the
+// exact failure this causes here: nativeCD was already 2 while the HLE reset
+// hleSync to 0 and then burned the full five-second timeout on every command.
 void hle_libcd_CD_sync(recomp_context *ctx) {
-  hle_libcd_CdSync(ctx);
+  const uint32_t mode = ctx->r[A0];
+  const uint32_t resultPtr = ctx->r[A1];
+
+  if (auto *bios = ctx->bios)
+    bios->drainCdromEventQueue();
+
+  auto &slot = psyq_state().cdSyncByte;
+  uint8_t code = slot.load(std::memory_order_acquire);
+
+  if (mode == 0 && code == 0) {
+    const auto deadline =
+        std::chrono::steady_clock::now() + std::chrono::seconds(5);
+    while (code == 0 && std::chrono::steady_clock::now() < deadline) {
+      if (getConfig().drainCallbacks)
+        getConfig().drainCallbacks();
+      code = slot.load(std::memory_order_acquire);
+      if (code == 0)
+        std::this_thread::sleep_for(std::chrono::microseconds(100));
+    }
+  }
+
+  // The native routine only treats 2 (Complete) and 5 (DiskError) as terminal.
+  // Our synchronous command path can occasionally have no queued IRQ left by
+  // the time a poll-mode caller arrives; report Complete in that nonblocking
+  // case, matching the public CdSync HLE.
+  if (mode != 0 && code == 0)
+    code = CDL_COMPLETE;
+
+  if (resultPtr != 0) {
+    ctx->mem->write8(resultPtr + 0, code);
+    for (int i = 1; i < 8; ++i)
+      ctx->mem->write8(resultPtr + i, 0);
+  }
+
+  ctx->r[V0] = code;
 }
 
 // CdReady(mode, *result)
