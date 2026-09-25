@@ -126,7 +126,8 @@ def apply_kernel_compat_overrides(config: Path, kernel: Path) -> None:
         if 'address = "0x80026FAC"' not in block:
             continue
         patched = re.sub(
-            r'(?m)^hle\s*=\s*(?:false|true)\s*        additions.append(
+            r'(?m)^hle\s*=\s*(?:false|true)\s*    if 'name = "libetc_VSync"' not in text:
+        additions.append(
             """[[hle_functions]]
 subsystem = "VSync"
 hle = true
@@ -406,7 +407,8 @@ if __name__ == "__main__":
             count=1,
         )
         patched = re.sub(
-            r'(?m)^name\s*=\s*"[^"]+"\s*        additions.append(
+            r'(?m)^name\s*=\s*"[^"]+"\s*    if 'name = "libetc_VSync"' not in text:
+        additions.append(
             """[[hle_functions]]
 subsystem = "VSync"
 hle = true
@@ -687,6 +689,7 @@ if __name__ == "__main__":
         applied.append("CD_sync@80026FAC")
         cd_sync_patched = True
         break
+
     if not cd_sync_patched:
         additions.append(
             """[[hle_functions]]
