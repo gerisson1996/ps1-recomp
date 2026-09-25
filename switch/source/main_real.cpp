@@ -250,6 +250,9 @@ int main(int, char **) {
   bios.setCdromController(&cdrom);
   bios.setDma(&dma);
   bios.setGameThreadId(std::this_thread::get_id());
+  bios.setGuestThreadDispatcher([&](uint32_t addr) {
+    recomp_dispatch(memory.ramPtr(), &ctx, addr);
+  });
   if (nativeVsyncMirror) {
     bios.setBssMirrors(kNativeCdSyncAddr, kNativeCdReadyAddr);
     std::printf("Native CD BSS mirror: %08X/%08X\n",
@@ -373,6 +376,7 @@ int main(int, char **) {
       const uint32_t waitId = bios.lastWaitEventId();
       const uint32_t waitResult = bios.lastWaitEventResult();
       const auto waitDbg = bios.eventSystem().debugInfo(waitId);
+      const auto threadDbg = bios.guestThreadMetrics();
 
       // Cheap once-per-second proof that the game is actually drawing or
       // uploading image data. Count non-black words across the full 1 MiB
@@ -399,6 +403,7 @@ int main(int, char **) {
           "       MDEC dec=%llu mb=%llu in=%llu out=%llu ready=%u busy=%u gameState=%u\n"
           "       WAIT id=%u res=%u calls=%llu hits=%llu valid=%u cls=%08X spec=%08X mode=%04X handler=%08X en=%u trig=%u pend=%u\n"
           "       INTR cb4=%08X cb5=%08X cb6=%08X\n"
+          "       THR open=%llu close=%llu change=%llu run=%llu id=%08X entry=%08X\n"
           "       STR ring=%08X/%u rd=%u wr=%u mask=%08X p1=%08X p2=%08X cb=%08X\n"
           "       CDHLE dataCb=%08X rem=%u dst=%08X words=%u\n",
           frame, ps1LastIndirectSite(), ps1LastIndirectTarget(),
@@ -432,6 +437,11 @@ int main(int, char **) {
           waitDbg.triggered ? 1u : 0u, waitDbg.pendingTrigger ? 1u : 0u,
           psyqDbg.intrCallback[4], psyqDbg.intrCallback[5],
           psyqDbg.intrCallback[6],
+          static_cast<unsigned long long>(threadDbg.opens),
+          static_cast<unsigned long long>(threadDbg.closes),
+          static_cast<unsigned long long>(threadDbg.changes),
+          static_cast<unsigned long long>(threadDbg.runs),
+          threadDbg.lastId, threadDbg.lastEntry,
           memory.read32(0x80065950u), memory.read32(0x80065954u),
           memory.read32(0x8006593Cu), memory.read32(0x80065938u),
           memory.read32(0x80065948u), memory.read32(0x80065924u),
