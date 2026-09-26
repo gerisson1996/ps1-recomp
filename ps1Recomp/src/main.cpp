@@ -256,6 +256,9 @@ int main(int argc, char *argv[]) {
     result_cpp += "#include <runtime/gte.h>\n";
     result_cpp += "#include <runtime/bios/bios.h>\n";
     result_cpp += "#include <runtime/psyq/psyq_hle.h>\n\n";
+    result_cpp += "#ifdef __SWITCH__\n";
+    result_cpp += "extern \"C\" [[noreturn]] void ps1_switch_dispatch_fatal(uint32_t addr, uint32_t phys, uint32_t site, uint32_t ra);\n";
+    result_cpp += "#endif\n\n";
     result_cpp += "// Forward declaration for OOB dispatch\n";
     result_cpp += "void recomp_dispatch(uint8_t* rdram, recomp_context* ctx, "
                   "uint32_t addr);\n\n";
