@@ -1,5 +1,5 @@
 #include "runtime/gpu/gpu.h"
-#ifndef __SWITCH__
+#if !defined(__SWITCH__) && !defined(__ANDROID__)
 #include <execinfo.h>
 #include <fmt/format.h>
 #endif
@@ -110,7 +110,7 @@ uint32_t GPU::readGPUREAD() {
 }
 
 void GPU::writeGP0(uint32_t val) {
-#ifndef __SWITCH__
+#if !defined(__SWITCH__) && !defined(__ANDROID__)
   // `PS1_GP0_TRACE=<hex opcode>` prints a host backtrace on the first few
   // GP0 commands with that opcode.  Crash writes GP0 directly rather than
   // through DMA, so the backtrace names the recompiled guest function that
