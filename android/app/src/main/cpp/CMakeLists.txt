@@ -35,7 +35,10 @@ target_compile_options(ps1recomp_android PRIVATE
     -fdata-sections
 )
 
-target_link_options(ps1recomp_android PRIVATE -Wl,--gc-sections)
+target_link_options(ps1recomp_android PRIVATE
+    -Wl,--gc-sections
+    -Wl,-u,ANativeActivity_onCreate
+)
 
 target_link_libraries(ps1recomp_android
     native_app_glue
