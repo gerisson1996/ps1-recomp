@@ -97,12 +97,14 @@ std::string emitDispatchBody() {
                      static_cast<unsigned>(ps1LastIndirectSite()),
                      static_cast<unsigned>(ctx->r[31]));
         std::fflush(stderr);
-#ifndef __SWITCH__
+#ifdef __SWITCH__
+        ps1_switch_dispatch_fatal(addr, phys, ps1LastIndirectSite(), ctx->r[31]);
+#else
         void* bt[24];
         int frames = backtrace(bt, 24);
         backtrace_symbols_fd(bt, frames, 2);
-#endif
         std::abort();
+#endif
     }
     static uint32_t s_unknownAddr = 0;
     static uint32_t s_unknownHitCount = 0;
