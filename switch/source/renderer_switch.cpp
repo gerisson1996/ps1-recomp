@@ -1,6 +1,8 @@
 #include "renderer_switch.h"
 #include <algorithm>
 #include <cstdint>
+#include <cstdio>
+#include <cstdlib>
 
 namespace ps1::gpu {
 
@@ -102,3 +104,20 @@ void RendererSwitch::destroy() {
 }
 
 } // namespace ps1::gpu
+
+
+extern "C" [[noreturn]] void ps1_switch_dispatch_fatal(
+    uint32_t addr, uint32_t phys, uint32_t site, uint32_t ra) {
+  std::printf("\n[DISPATCH-STOP]\n");
+  std::printf("target=%08X phys=%08X\n", addr, phys);
+  std::printf("site=%08X RA=%08X\n", site, ra);
+  std::printf("Guest dispatch stopped before Atmosphere abort.\n");
+  std::printf("Take a photo of this screen. HOME exits.\n");
+  consoleUpdate(nullptr);
+
+  while (appletMainLoop()) {
+    consoleUpdate(nullptr);
+    svcSleepThread(100'000'000);
+  }
+  std::_Exit(1);
+}
