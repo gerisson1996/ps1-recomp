@@ -50,8 +50,6 @@ void onCommand(android_app *app, int32_t cmd) {
 } // namespace
 
 void android_main(android_app *app) {
-  app_dummy();
-
   AppState state;
   state.memory.setGPU(&state.gpu);
   app->userData = &state;
@@ -63,7 +61,7 @@ void android_main(android_app *app) {
   while (!app->destroyRequested) {
     int events = 0;
     android_poll_source *source = nullptr;
-    while (ALooper_pollAll(0, nullptr, &events,
+    while (ALooper_pollOnce(0, nullptr, &events,
                            reinterpret_cast<void **>(&source)) >= 0) {
       if (source)
         source->process(app, source);
