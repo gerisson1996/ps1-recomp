@@ -1,6 +1,8 @@
 #include "runtime/gpu/gpu.h"
 #if !defined(__SWITCH__) && !defined(__ANDROID__)
 #include <execinfo.h>
+#endif
+#ifndef __SWITCH__
 #include <fmt/format.h>
 #endif
 #include <cstdlib>
