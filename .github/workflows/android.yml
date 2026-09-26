@@ -37,7 +37,12 @@ jobs:
         run: gradle --no-daemon :app:assembleDebug
 
       - name: Verify APK
-        run: test -s android/app/build/outputs/apk/debug/app-debug.apk
+        run: |
+          APK=android/app/build/outputs/apk/debug/app-debug.apk
+          test -s "$APK"
+          unzip -p "$APK" lib/arm64-v8a/libps1recomp_android.so > /tmp/libps1recomp_android.so
+          readelf -Ws /tmp/libps1recomp_android.so | grep -q "ANativeActivity_onCreate"
+          readelf -Ws /tmp/libps1recomp_android.so | grep -q "android_main"
 
       - name: Upload APK
         uses: actions/upload-artifact@v4
