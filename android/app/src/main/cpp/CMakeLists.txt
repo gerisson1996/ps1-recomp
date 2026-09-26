@@ -17,6 +17,7 @@ add_library(ps1recomp_android SHARED
     main_android.cpp
     renderer_android.cpp
     ${RUNTIME}/src/gpu/gpu.cpp
+    ${RUNTIME}/src/metrics.cpp
 )
 
 target_include_directories(ps1recomp_android PRIVATE
