@@ -1,6 +1,7 @@
 #include <android/log.h>
 #include <android_native_app_glue.h>
 #include <chrono>
+#include <memory>
 #include <thread>
 
 #include "renderer_android.h"
@@ -50,7 +51,10 @@ void onCommand(android_app *app, int32_t cmd) {
 } // namespace
 
 void android_main(android_app *app) {
-  AppState state;
+  // PS1 RAM and BIOS exceed the native thread stack budget.
+  // Keep the state on the heap for the lifetime of android_main.
+  auto stateOwner = std::make_unique<AppState>();
+  AppState &state = *stateOwner;
   state.memory.setGPU(&state.gpu);
   app->userData = &state;
   app->onAppCmd = onCommand;
@@ -80,6 +84,8 @@ void android_main(android_app *app) {
   }
 
   state.renderer.destroy();
+  app->onAppCmd = nullptr;
+  app->userData = nullptr;
   __android_log_print(ANDROID_LOG_INFO, kTag,
                       "PS1Recomp Android bootstrap stopped");
 }
