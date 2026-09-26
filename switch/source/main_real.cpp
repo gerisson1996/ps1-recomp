@@ -1,6 +1,10 @@
 #include <switch.h>
 
 #include <chrono>
+#include <cerrno>
+#include <cstdarg>
+#include <sys/stat.h>
+#include <unistd.h>
 #include <cstdio>
 #include <cstdlib>
 #include <cstdint>
@@ -30,6 +34,86 @@ void recomp_init_dispatch_table();
 void recomp_dispatch(uint8_t *rdram, recomp_context *ctx, uint32_t addr);
 
 namespace {
+
+constexpr const char *kLogPath = "sdmc:/switch/ps1recomp/logs/latest.log";
+constexpr const char *kPreviousLogPath = "sdmc:/switch/ps1recomp/logs/previous.log";
+constexpr long kMaxLogBytes = 8 * 1024 * 1024;
+bool logEnabled = false;
+const auto logStart = std::chrono::steady_clock::now();
+
+bool ensureLogDirectory(const char *path) {
+  if (::mkdir(path, 0777) == 0)
+    return true;
+  struct stat info {};
+  return errno == EEXIST && ::stat(path, &info) == 0 && S_ISDIR(info.st_mode);
+}
+
+void initLog() {
+  if (!ensureLogDirectory("sdmc:/switch") ||
+      !ensureLogDirectory("sdmc:/switch/ps1recomp") ||
+      !ensureLogDirectory("sdmc:/switch/ps1recomp/logs")) {
+    std::printf("[LOG] Cannot create log folder; console only.\n");
+    return;
+  }
+  struct stat info {};
+  if (::stat(kLogPath, &info) == 0) {
+    if ((std::remove(kPreviousLogPath) != 0 && errno != ENOENT) ||
+        std::rename(kLogPath, kPreviousLogPath) != 0) {
+      std::printf("[LOG] Cannot rotate log; preserving existing file.\n");
+      return;
+    }
+  } else if (errno != ENOENT) {
+    std::printf("[LOG] Cannot inspect existing log; console only.\n");
+    return;
+  }
+  FILE *file = std::fopen(kLogPath, "wb");
+  if (!file) {
+    std::printf("[LOG] Cannot open log file; console only.\n");
+    return;
+  }
+  logEnabled = std::fclose(file) == 0;
+}
+
+// Called from the main/game thread only. Keep console diagnostics visible,
+// while committing each block to SD before returning to guest execution.
+void logPrintf(const char *format, ...) __attribute__((format(printf, 1, 2)));
+void logPrintf(const char *format, ...) {
+  va_list args;
+  va_start(args, format);
+  std::vprintf(format, args);
+  va_end(args);
+  if (!logEnabled)
+    return;
+  FILE *file = std::fopen(kLogPath, "ab");
+  if (!file) {
+    logEnabled = false;
+    std::printf("[LOG] SD write failed; console logging continues.\n");
+    return;
+  }
+  const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+      std::chrono::steady_clock::now() - logStart).count();
+  bool ok = std::fprintf(file, "[%lld ms] ", static_cast<long long>(ms)) >= 0;
+  va_start(args, format);
+  if (std::vfprintf(file, format, args) < 0)
+    ok = false;
+  va_end(args);
+  const long size = std::ftell(file);
+  if (size >= kMaxLogBytes) {
+    std::fputs("\n[LOG] 8 MiB limit reached; file logging stopped for this session.\n", file);
+    logEnabled = false;
+  }
+  if (std::fflush(file) != 0)
+    ok = false;
+  if (::fsync(::fileno(file)) != 0)
+    ok = false;
+  if (std::fclose(file) != 0)
+    ok = false;
+  if (!ok) {
+    logEnabled = false;
+    std::printf("[LOG] SD write/flush failed; console logging continues.\n");
+  }
+}
+
 
 constexpr const char *kKernelPath = "sdmc:/switch/ps1recomp/KERNEL.BIN";
 constexpr const char *kDiscCandidates[] = {
@@ -143,6 +227,7 @@ void mapPad(ps1::input::InputController &input, u64 held) {
 }
 
 [[noreturn]] void cleanExit(ps1::gpu::RendererSwitch &renderer) {
+  logPrintf("[LOG] Normal exit.\n");
   renderer.destroy();
   consoleExit(nullptr);
   std::_Exit(0);
@@ -152,19 +237,22 @@ void mapPad(ps1::input::InputController &input, u64 held) {
 
 int main(int, char **) {
   consoleInit(nullptr);
+  initLog();
+  logPrintf("[LOG] REAL GAME build %s %s; file=%s enabled=%u\n",
+            __DATE__, __TIME__, kLogPath, logEnabled ? 1u : 0u);
   padConfigureInput(1, HidNpadStyleSet_NpadStandard);
   PadState pad;
   padInitializeDefault(&pad);
 
-  std::printf("ps1Recomp Switch - REAL GAME bring-up\n");
-  std::printf("Kernel: %s\n", kKernelPath);
+  logPrintf("ps1Recomp Switch - REAL GAME bring-up\n");
+  logPrintf("Kernel: %s\n", kKernelPath);
 
   std::vector<uint8_t> kernel;
   PsxExeBootInfo boot{};
   if (!readFile(kKernelPath, kernel) || !parsePsxExe(kernel, boot)) {
-    std::printf("KERNEL.BIN missing or invalid PS-X EXE.\n");
-    std::printf("Expected: sdmc:/switch/ps1recomp/KERNEL.BIN\n");
-    std::printf("Press + to exit.\n");
+    logPrintf("KERNEL.BIN missing or invalid PS-X EXE.\n");
+    logPrintf("Expected: sdmc:/switch/ps1recomp/KERNEL.BIN\n");
+    logPrintf("Press + to exit.\n");
     while (appletMainLoop()) {
       padUpdate(&pad);
       if (padGetButtonsDown(&pad) & HidNpadButton_Plus)
@@ -176,15 +264,15 @@ int main(int, char **) {
     return 1;
   }
 
-  std::printf("KERNEL READY\n");
-  std::printf("PC=%08X LOAD=%08X SIZE=%u GP=%08X SP=%08X\n",
+  logPrintf("KERNEL READY\n");
+  logPrintf("PC=%08X LOAD=%08X SIZE=%u GP=%08X SP=%08X\n",
               boot.pc, boot.loadAddr, boot.payloadSize, boot.gp,
               boot.spBase + boot.spOffset);
 
   const bool nativeVsyncMirror =
       boot.pc == 0x80010B08u && boot.loadAddr == 0x80010000u &&
       boot.payloadSize == 985088u;
-  std::printf("Native VSync RAM mirror: %s\n",
+  logPrintf("Native VSync RAM mirror: %s\n",
               nativeVsyncMirror ? "ON" : "OFF");
 
   static ps1::Memory memory;
@@ -236,11 +324,11 @@ int main(int, char **) {
     }
   }
   if (mountedDisc) {
-    std::printf("DISC: mounted %s\n", mountedDisc);
-    std::printf("DISC: bytes=%ld raw2352_rem=%ld\n", mountedDiscBytes,
+    logPrintf("DISC: mounted %s\n", mountedDisc);
+    logPrintf("DISC: bytes=%ld raw2352_rem=%ld\n", mountedDiscBytes,
                 mountedDiscBytes > 0 ? (mountedDiscBytes % 2352) : -1L);
   } else {
-    std::printf("DISC: not found (boot continues; CD reads may stop later)\n");
+    logPrintf("DISC: not found (boot continues; CD reads may stop later)\n");
   }
 
   recomp_context ctx{};
@@ -261,7 +349,7 @@ int main(int, char **) {
   });
   if (nativeVsyncMirror) {
     bios.setBssMirrors(kNativeCdSyncAddr, kNativeCdReadyAddr);
-    std::printf("Native CD BSS mirror: %08X/%08X\n",
+    logPrintf("Native CD BSS mirror: %08X/%08X\n",
                 kNativeCdSyncAddr, kNativeCdReadyAddr);
   }
 
@@ -363,7 +451,7 @@ int main(int, char **) {
     // ownership caused an Atmosphere crash on hardware. R3 therefore shows a
     // frozen snapshot only; + exits the preview cleanly.
     if (!rendererActive && (down & HidNpadButton_StickR)) {
-      std::printf("[REAL] R3 -> frozen VRAM preview (+ exits)\n");
+      logPrintf("[REAL] R3 -> frozen VRAM preview (+ exits)\n");
       consoleUpdate(nullptr);
       rendererActive = renderer.init();
       if (rendererActive) {
@@ -374,10 +462,11 @@ int main(int, char **) {
           renderer.renderFrame();
           svcSleepThread(16'000'000);
         }
+        logPrintf("[LOG] Leaving frozen VRAM preview.\n");
         renderer.destroy();
         std::_Exit(0);
       } else {
-        std::printf("[REAL] framebuffer init failed; console restored\n");
+        logPrintf("[REAL] framebuffer init failed; console restored\n");
         consoleUpdate(nullptr);
       }
     }
@@ -439,7 +528,7 @@ int main(int, char **) {
         vramHash *= 16777619u;
       }
 
-      std::printf(
+      logPrintf(
           "[REAL] vsync=%u site=%08X->%08X RA=%08X SP=%08X GP=%08X\n"
           "       BIOSREG T1=%08X A0=%08X A1=%08X A2=%08X V0=%08X\n"
           "       GPUSTAT=%08X DISP=%u,%u mode=%s\n"
@@ -515,17 +604,17 @@ int main(int, char **) {
   recomp_init_dispatch_table();
   ctx.pc = boot.pc;
 
-  std::printf("Dispatch table ready. Starting PC=%08X\n", boot.pc);
-  std::printf("Diagnostic console stays visible.\n");
-  std::printf("R3 = frozen VRAM preview | PLUS+MINUS = exit\n");
+  logPrintf("Dispatch table ready. Starting PC=%08X\n", boot.pc);
+  logPrintf("Diagnostic console stays visible.\n");
+  logPrintf("R3 = frozen VRAM preview | PLUS+MINUS = exit\n");
   consoleUpdate(nullptr);
 
   // This call normally never returns: the recompiled game owns the thread.
   recomp_dispatch(memory.ramPtr(), &ctx, boot.pc);
 
   if (!rendererActive) {
-    std::printf("GAME RETURNED from PC=%08X RA=%08X\n", ctx.pc, ctx.r[ps1::RA]);
-    std::printf("Press + to exit.\n");
+    logPrintf("GAME RETURNED from PC=%08X RA=%08X\n", ctx.pc, ctx.r[ps1::RA]);
+    logPrintf("Press + to exit.\n");
     while (appletMainLoop()) {
       padUpdate(&pad);
       if (padGetButtonsDown(&pad) & HidNpadButton_Plus)
